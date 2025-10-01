@@ -10,16 +10,22 @@ import (
 )
 
 func main() {
-	// Si hay flags (ej: -repo) → ejecutar como CLI
+	// CLI
 	if len(os.Args) > 1 && os.Args[1][0] == '-' {
 		cli.Run()
 		return
 	}
 
-	// Sino, levantar API
+	// API
 	r := api.NewRouter()
-	log.Println("🚀 sammcore-deployer API escuchando en http://localhost:8080")
-	if err := http.ListenAndServe(":8080", r); err != nil {
+
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8080"
+	}
+	log.Printf("🚀 sammcore-deployer API escuchando en http://localhost:%s", port)
+
+	if err := http.ListenAndServe(":"+port, r); err != nil {
 		log.Fatalf("❌ Error iniciando servidor: %v", err)
 	}
 }
