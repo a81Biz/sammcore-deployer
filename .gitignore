@@ -1,0 +1,20 @@
+# Binarios y builds
+/bin/
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Módulos descargados (si usas Go modules)
+go.sum
+
+# Carpetas de dependencias antiguas (GOPATH-style)
+vendor/
+
+# Archivos temporales del editor
+*.swp
+*~
+.DS_Store
+
+
+.env
