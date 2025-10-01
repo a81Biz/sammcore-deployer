@@ -1,0 +1,26 @@
+[
+  {
+    "id": "729cf594",
+    "repo": "https://github.com/docker/awesome-compose.git",
+    "branch": "master",
+    "type": "dockerfile",
+    "status": "analizado",
+    "timestamp": "2025-10-01T02:29:49.4415848-06:00"
+  },
+  {
+    "id": "44d7aac1",
+    "repo": "https://github.com/a81Biz/ecv-shortener.git",
+    "branch": "master",
+    "type": "unknown",
+    "status": "analizado",
+    "timestamp": "2025-10-01T02:30:41.9180186-06:00"
+  },
+  {
+    "id": "a542434e",
+    "repo": "https://github.com/a81Biz/WoocomerceTienda.git",
+    "branch": "main",
+    "type": "compose",
+    "status": "analizado",
+    "timestamp": "2025-10-01T02:31:55.3017955-06:00"
+  }
+]

@@ -1,10 +1,14 @@
 package core
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"strings"
+	"time"
 
 	"sammcore-deployer/secrets"
 	"sammcore-deployer/services"
+	"sammcore-deployer/storage"
 )
 
 type AnalyzeRequest struct {
@@ -20,6 +24,12 @@ type AnalyzeResponse struct {
 	Workdir  string   `json:"workdir,omitempty"`
 	Type     string   `json:"type,omitempty"`
 	Evidence []string `json:"evidence,omitempty"`
+}
+
+func generateID() string {
+	b := make([]byte, 4)
+	rand.Read(b)
+	return hex.EncodeToString(b)
 }
 
 func Analyze(req AnalyzeRequest) AnalyzeResponse {
@@ -51,6 +61,16 @@ func Analyze(req AnalyzeRequest) AnalyzeResponse {
 	if err != nil {
 		return AnalyzeResponse{Status: "error", Error: err.Error()}
 	}
+	// Guardar en history
+	p := storage.Project{
+		ID:        generateID(),
+		Repo:      repo,
+		Branch:    branch,
+		Type:      result.Type.String(),
+		Status:    "analizado",
+		Timestamp: time.Now(),
+	}
+	storage.AddProject(p)
 
 	return AnalyzeResponse{
 		Status:   "ok",
@@ -58,4 +78,5 @@ func Analyze(req AnalyzeRequest) AnalyzeResponse {
 		Type:     result.Type.String(),
 		Evidence: result.Evidence,
 	}
+
 }

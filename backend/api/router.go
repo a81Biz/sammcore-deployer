@@ -5,11 +5,56 @@ import (
 	"net/http"
 
 	"sammcore-deployer/core"
+	"sammcore-deployer/storage"
 
 	"github.com/gorilla/mux"
 )
 
-func NewRouter() *mux.Router {
+func enableCORS(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS, PUT, DELETE")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+
+		// Si es una preflight request, respondemos sin pasar al siguiente handler
+		if r.Method == "OPTIONS" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+
+		next.ServeHTTP(w, r)
+	})
+}
+
+func historyHandler(w http.ResponseWriter, r *http.Request) {
+	projects, _ := storage.LoadProjects()
+	json.NewEncoder(w).Encode(projects)
+}
+
+func deleteHandler(w http.ResponseWriter, r *http.Request) {
+	id := mux.Vars(r)["id"]
+	storage.DeleteProject(id)
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]string{"status": "deleted"})
+}
+
+func logsHandler(w http.ResponseWriter, r *http.Request) {
+	id := mux.Vars(r)["id"]
+	json.NewEncoder(w).Encode(map[string]string{
+		"id":   id,
+		"logs": "📜 Aquí aparecerían los logs de despliegue (mock).",
+	})
+}
+
+func redeployHandler(w http.ResponseWriter, r *http.Request) {
+	id := mux.Vars(r)["id"]
+	json.NewEncoder(w).Encode(map[string]string{
+		"id":     id,
+		"status": "♻️ Redeploy iniciado (mock).",
+	})
+}
+
+func NewRouter() http.Handler {
 	r := mux.NewRouter()
 
 	// Healthcheck
@@ -30,5 +75,10 @@ func NewRouter() *mux.Router {
 		json.NewEncoder(w).Encode(resp)
 	}).Methods("POST")
 
-	return r
+	r.HandleFunc("/history", historyHandler).Methods("GET")
+	r.HandleFunc("/history/{id}", deleteHandler).Methods("DELETE")
+	r.HandleFunc("/logs/{id}", logsHandler).Methods("GET")
+	r.HandleFunc("/redeploy/{id}", redeployHandler).Methods("POST")
+
+	return enableCORS(r)
 }
