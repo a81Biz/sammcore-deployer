@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"net/http"
 
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+
 	"sammcore-deployer/core"
 	"sammcore-deployer/storage"
 
@@ -56,6 +58,9 @@ func redeployHandler(w http.ResponseWriter, r *http.Request) {
 
 func NewRouter() http.Handler {
 	r := mux.NewRouter()
+
+	// métricas para Prometheus
+	r.Handle("/metrics", promhttp.Handler())
 
 	// Healthcheck
 	r.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
