@@ -5,6 +5,8 @@ import (
 	"net/http"
 	"os"
 
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+
 	"sammcore-deployer/api"
 	"sammcore-deployer/cli"
 )
@@ -18,6 +20,9 @@ func main() {
 
 	// API
 	r := api.NewRouter()
+
+	// métricas para Prometheus
+	http.Handle("/metrics", promhttp.Handler())
 
 	port := os.Getenv("PORT")
 	if port == "" {
