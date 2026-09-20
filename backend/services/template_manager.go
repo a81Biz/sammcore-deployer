@@ -18,7 +18,8 @@ type ProjectManifestParams struct {
 	WebPort          int    `json:"web_port,omitempty"`
 	APIImage         string `json:"api_image,omitempty"`
 	APIPort          int    `json:"api_port,omitempty"`
-	AppImage         string `json:"app_image,omitempty"`
+	AppImage         string            `json:"app_image,omitempty"`
+	AppPort          int               `json:"app_port,omitempty"`
 	StaticImage      string            `json:"static_image,omitempty"`
 	HasCustomEnv     bool              `json:"has_custom_env"`
 	BuildArgs        map[string]string `json:"build_args,omitempty"`
