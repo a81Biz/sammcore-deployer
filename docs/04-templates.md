@@ -14,21 +14,19 @@ Cuando un repositorio contiene `docker-compose.yml`, el módulo `TemplateManager
    - Se inyectan las credenciales del clúster central de Supabase (Modelo A) mediante variables de entorno referenciadas al Secret `{{ .projectName }}-db-secrets`.
 2. **Heurística Frontend (Web) vs Backend (API):**
    - **Servicio Web / Frontend:** Aquel que expone puertos estándar de interfaz (`80`, `3000`, `5173`, `8080`) o utiliza servidores web como NGINX o scripts de Vite. Se le asigna Ingress en `https://{{ .projectName }}.sammcore.local`.
-   - **Servicio API / Backend:** Aquel que expone puertos de servicio (`8000`, `5000`, `8080`) o corre runtimes de backend (Go, Python/FastAPI, Node/Express). Se le asigna Ingress en `https://api.{{ .projectName }}.sammcore.local`.
+   - **Servicio API / Backend:** Aquel que expone puertos de servicio (`8000`, `5000`, `8080`) o corre runtimes de backend (Go, Python/FastAPI, Node/Express). Se le asigna Ingress en `https://{{ .projectName }}-api.sammcore.local` (subdominio de nivel único compatible con el certificado Wildcard `*.sammcore.local`).
 3. **Manejo de `VITE_API_BASE` en Frontend:**
-   - Como Vite hornea las variables `VITE_*` durante el comando `build`, la URL pública de la API (`https://api.{{ .projectName }}.sammcore.local`) se suministra como `--build-arg` durante la compilación de la imagen, o bien se provee un subpath proxy `/api/` en el NGINX del frontend.
+   - Como Vite hornea las variables `VITE_*` durante el comando `build`, la URL pública de la API (`https://{{ .projectName }}-api.sammcore.local`) se suministra como `--build-arg` durante la compilación de la imagen, o bien se provee un subpath proxy `/api/` en el NGINX del frontend.
 4. **Traducción de Volúmenes y Dependencias:**
    - Los volúmenes montados por servicios de BD se descartan.
    - Los volúmenes de almacenamiento de archivos de la app se traducen a `PersistentVolumeClaim` de 5Gi con `storageClassName: local-path`.
-   - La directiva `depends_on: [db]` se traduce en un `initContainer` ligero que verifica la disponibilidad del puerto 5432 en `postgres.supabase.svc.cluster.local`.
+   - La directiva `depends_on: [db]` se traduce en un `initContainer` ligero con recursos delimitados que verifica la disponibilidad del puerto 5432 en `postgres.supabase.svc.cluster.local`.
 
 ---
 
 ## 2. 🧩 Plantillas de Manifiestos Base por Proyecto
 
-### 🔹 2.1. Namespace, Cuotas y NetworkPolicy
-Aplicado a todo proyecto para garantizar aislamiento multi-tenant sin romper la comunicación interna:
-
+### 🔹 2.1. Namespace, Pod Security, Cuotas y NetworkPolicy
 ```yaml
 apiVersion: v1
 kind: Namespace
@@ -37,6 +35,7 @@ metadata:
   labels:
     app.kubernetes.io/managed-by: sammcore-deployer
     project: {{ .projectName }}
+    pod-security.kubernetes.io/enforce: baseline
 ---
 apiVersion: v1
 kind: ResourceQuota
@@ -50,6 +49,21 @@ spec:
     limits.cpu: "2000m"
     limits.memory: "2Gi"
     pods: "10"
+---
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: {{ .projectName }}-limits
+  namespace: {{ .namespace }}
+spec:
+  limits:
+    - default:
+        cpu: "500m"
+        memory: "512Mi"
+      defaultRequest:
+        cpu: "50m"
+        memory: "64Mi"
+      type: Container
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -105,7 +119,7 @@ spec:
 ---
 
 ### 🔹 2.2. Secret de Base de Datos Supabase (Modelo A)
-Generado en memoria por `SecretManager`:
+Generado en memoria por `SecretManager` (solo si `requires_database = true`):
 
 ```yaml
 apiVersion: v1
@@ -146,10 +160,11 @@ spec:
       labels:
         app: {{ .projectName }}-web
     spec:
+      automountServiceAccountToken: false
       containers:
         - name: web
           image: {{ .webImage }}
-          imagePullPolicy: IfNotPresent
+          imagePullPolicy: Always
           ports:
             - name: http
               containerPort: {{ .webPort }}
@@ -203,14 +218,22 @@ spec:
       labels:
         app: {{ .projectName }}-api
     spec:
+      automountServiceAccountToken: false
       initContainers:
         - name: wait-for-db
           image: busybox:1.36
           command: ['sh', '-c', 'until nc -z -w 2 postgres.supabase.svc.cluster.local 5432; do echo esperando postgres; sleep 2; done']
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 50m
+              memory: 32Mi
       containers:
         - name: api
           image: {{ .apiImage }}
-          imagePullPolicy: IfNotPresent
+          imagePullPolicy: Always
           ports:
             - name: http
               containerPort: {{ .apiPort }}
@@ -250,7 +273,7 @@ spec:
       targetPort: {{ .apiPort }}
 ```
 
-#### Ingress Multi-Subdominio (Compose):
+#### Ingress Multi-Subdominio (Nivel Único compatible con Wildcard TLS):
 ```yaml
 apiVersion: networking.k8s.io/v1
 kind: Ingress
@@ -272,7 +295,7 @@ spec:
                 name: {{ .projectName }}-web
                 port:
                   number: {{ .webPort }}
-    - host: api.{{ .projectName }}.sammcore.local
+    - host: {{ .projectName }}-api.sammcore.local
       http:
         paths:
           - path: /
@@ -287,8 +310,6 @@ spec:
 ---
 
 ### 🔹 Arquetipo 2: Microservicio Individual (`single-dockerfile`)
-Un único pod para backend o servicio con un único host:
-
 ```yaml
 apiVersion: apps/v1
 kind: Deployment
@@ -305,13 +326,32 @@ spec:
       labels:
         app: {{ .projectName }}-app
     spec:
+      automountServiceAccountToken: false
+      {{- if .requiresDatabase }}
+      initContainers:
+        - name: wait-for-db
+          image: busybox:1.36
+          command: ['sh', '-c', 'until nc -z -w 2 postgres.supabase.svc.cluster.local 5432; do sleep 2; done']
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 50m
+              memory: 32Mi
+      {{- end }}
       containers:
         - name: app
           image: {{ .appImage }}
-          imagePullPolicy: IfNotPresent
+          imagePullPolicy: Always
           ports:
             - name: http
               containerPort: {{ .appPort }}
+          {{- if .requiresDatabase }}
+          envFrom:
+            - secretRef:
+                name: {{ .projectName }}-db-secrets
+          {{- end }}
           readinessProbe:
             tcpSocket:
               port: {{ .appPort }}
@@ -362,8 +402,6 @@ spec:
 ---
 
 ### 🔹 Arquetipo 3: Sitio Web Estático (`static-web`)
-Servido mediante imagen ligera de NGINX con un único host:
-
 ```yaml
 apiVersion: apps/v1
 kind: Deployment
@@ -380,10 +418,11 @@ spec:
       labels:
         app: {{ .projectName }}-static
     spec:
+      automountServiceAccountToken: false
       containers:
         - name: nginx
           image: {{ .staticImage }}
-          imagePullPolicy: IfNotPresent
+          imagePullPolicy: Always
           ports:
             - name: http
               containerPort: 80
@@ -431,22 +470,23 @@ spec:
 
 ---
 
-## 4. 🔨 Plantilla de Build In-Cluster con Kaniko
+## 4. 🔨 Plantilla de Build In-Cluster con Kaniko (Namespace `deployer-builds`)
 
-Si el proyecto no se construye en el CI del repo cliente, `DeployManager` lanza este Job en un namespace temporal de build o en el namespace del proyecto:
+Los builds se ejecutan en un namespace aislado de construcción para no consumir la cuota de la app:
 
 ```yaml
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: kaniko-build-{{ .projectName }}
-  namespace: {{ .namespace }}
+  name: kaniko-build-{{ .projectName }}-{{ .serviceName }}
+  namespace: deployer-builds
 spec:
   ttlSecondsAfterFinished: 120
   backoffLimit: 1
   template:
     spec:
       restartPolicy: Never
+      automountServiceAccountToken: false
       containers:
         - name: kaniko
           image: gcr.io/kaniko-project/executor:v1.23.0

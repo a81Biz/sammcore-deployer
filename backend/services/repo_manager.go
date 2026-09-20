@@ -3,10 +3,11 @@ package services
 import (
 	"errors"
 	"fmt"
-	"io/fs"
 	"log"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 
 	git "github.com/go-git/go-git/v5"
@@ -37,17 +38,21 @@ func (t ProjectType) String() string {
 }
 
 type DetectionResult struct {
-	Type     ProjectType
-	Evidence []string
+	Type             ProjectType
+	Evidence         []string
+	RequiresDatabase bool
+	DetectedPorts    []int
+	ResolvedBranch   string
 }
 
 type RepoManager struct {
-	RepoURL  string
-	Branch   string
-	Workdir  string
-	Verbose  bool
-	Username string // opcional, para auth
-	Password string // opcional, puede ser token
+	RepoURL        string
+	Branch         string
+	Workdir        string
+	Verbose        bool
+	Username       string // opcional, para auth
+	Password       string // opcional, puede ser token
+	ResolvedBranch string
 }
 
 func NewRepoManager(repoURL, branch, workdir string, verbose bool) *RepoManager {
@@ -74,8 +79,6 @@ func (r *RepoManager) Clone() error {
 		branch = "main"
 	}
 
-	log.Printf("[Clone] Clonando repo %s en %s (branch=%s)", r.RepoURL, target, branch)
-
 	opts := &git.CloneOptions{
 		URL:           r.RepoURL,
 		Progress:      progressWriter(r.Verbose),
@@ -84,105 +87,153 @@ func (r *RepoManager) Clone() error {
 		ReferenceName: plumbing.NewBranchReferenceName(branch),
 	}
 
-	// Si se configuró auth
+	// Asignación de autenticación ANTES de clonar
 	if r.Username != "" || r.Password != "" {
 		opts.Auth = &http.BasicAuth{
 			Username: r.Username,
 			Password: r.Password,
 		}
-		log.Printf("[Clone] Usando autenticación para %s", r.Username)
+		log.Printf("[Clone] Usando credenciales para clonado de %s", r.RepoURL)
 	}
 
-	// Primer intento
+	// 1. Intentar con la rama solicitada
 	_, err := git.PlainClone(target, false, opts)
 	if err == nil {
-		log.Printf("[Clone] Éxito: rama %s", branch)
+		r.ResolvedBranch = branch
 		return nil
 	}
-	log.Printf("[Clone] Falló rama %s: %v", branch, err)
 
-	// Fallback a master si era main
+	// 2. Fallback a master si se solicitó main
 	if branch == "main" {
-		log.Printf("[Clone] Intentando fallback -> master")
 		opts.ReferenceName = plumbing.NewBranchReferenceName("master")
 		_, errMaster := git.PlainClone(target, false, opts)
 		if errMaster == nil {
-			log.Printf("[Clone] Éxito: rama master")
+			r.ResolvedBranch = "master"
 			return nil
 		}
-		log.Printf("[Clone] Falló master: %v", errMaster)
 	}
 
-	// Fallback sin rama (default)
-	log.Printf("[Clone] Intentando fallback -> default (sin rama)")
+	// 3. Fallback a la rama por defecto del repositorio remoto
 	opts.SingleBranch = false
 	opts.ReferenceName = ""
-	_, errDefault := git.PlainClone(target, false, opts)
+	repo, errDefault := git.PlainClone(target, false, opts)
 	if errDefault == nil {
-		log.Printf("[Clone] Éxito: rama default")
+		ref, refErr := repo.Head()
+		if refErr == nil {
+			r.ResolvedBranch = ref.Name().Short()
+		} else {
+			r.ResolvedBranch = "default"
+		}
 		return nil
 	}
-	log.Printf("[Clone] Falló default: %v", errDefault)
 
-	return fmt.Errorf("no se pudo clonar repo (branch=%s): %v", branch, err)
+	return fmt.Errorf("fallo al clonar repositorio (rama=%s): %v", branch, err)
 }
+
+var portRegex = regexp.MustCompile(`(?m)^\s*-\s*["']?(\d+):(\d+)["']?`)
+var exposeRegex = regexp.MustCompile(`(?i)^\s*EXPOSE\s+(\d+)`)
+var dbImageRegex = regexp.MustCompile(`(?i)(postgres|mysql|mariadb|cockroach|timescale)`)
 
 func (r *RepoManager) DetectProjectType() (DetectionResult, error) {
 	if r.Workdir == "" {
 		return DetectionResult{}, errors.New("Workdir no establecido")
 	}
 
-	var evidence []string
-	hasCompose := false
-	hasDockerfile := false
-	hasStatic := false
-
-	err := filepath.WalkDir(r.Workdir, func(path string, d fs.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return walkErr
-		}
-		if d.IsDir() {
-			if d.Name() == ".git" {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-
-		name := strings.ToLower(d.Name())
-		switch {
-		case name == "docker-compose.yml" || name == "docker-compose.yaml":
-			hasCompose = true
-			evidence = append(evidence, rel(r.Workdir, path))
-		case name == "dockerfile":
-			hasDockerfile = true
-			evidence = append(evidence, rel(r.Workdir, path))
-		case name == "index.html":
-			hasStatic = true
-			evidence = append(evidence, rel(r.Workdir, path))
-		}
-		return nil
-	})
+	// Inspección acotada a la raíz del repositorio para evitar falsos positivos
+	entries, err := os.ReadDir(r.Workdir)
 	if err != nil {
 		return DetectionResult{}, err
 	}
 
-	switch {
-	case hasCompose:
-		return DetectionResult{Type: ProjectCompose, Evidence: evidence}, nil
-	case hasDockerfile:
-		return DetectionResult{Type: ProjectDockerfile, Evidence: evidence}, nil
-	case hasStatic:
-		return DetectionResult{Type: ProjectStatic, Evidence: evidence}, nil
-	default:
-		return DetectionResult{Type: ProjectUnknown, Evidence: evidence}, nil
-	}
-}
+	var hasComposeFile string
+	var hasDockerfile string
+	var hasIndexHTML string
+	var hasPackageJSON string
 
-func rel(root, p string) string {
-	if q, err := filepath.Rel(root, p); err == nil {
-		return q
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := strings.ToLower(entry.Name())
+		switch name {
+		case "docker-compose.yml", "docker-compose.yaml":
+			hasComposeFile = entry.Name()
+		case "dockerfile":
+			hasDockerfile = entry.Name()
+		case "index.html":
+			hasIndexHTML = entry.Name()
+		case "package.json":
+			hasPackageJSON = entry.Name()
+		}
 	}
-	return p
+
+	res := DetectionResult{
+		ResolvedBranch: r.ResolvedBranch,
+	}
+
+	// 1. Detección Compose
+	if hasComposeFile != "" {
+		res.Type = ProjectCompose
+		res.Evidence = append(res.Evidence, hasComposeFile)
+
+		content, err := os.ReadFile(filepath.Join(r.Workdir, hasComposeFile))
+		if err == nil {
+			text := string(content)
+			// Verificar si declara un servicio de base de datos relacional
+			if dbImageRegex.MatchString(text) || strings.Contains(text, "5432") || strings.Contains(text, "3306") || strings.Contains(text, "DB_HOST") {
+				res.RequiresDatabase = true
+			}
+			// Extraer puertos expuestos
+			matches := portRegex.FindAllStringSubmatch(text, -1)
+			seenPorts := make(map[int]bool)
+			for _, m := range matches {
+				if len(m) > 1 {
+					if p, err := strconv.Atoi(m[1]); err == nil && !seenPorts[p] {
+						seenPorts[p] = true
+						res.DetectedPorts = append(res.DetectedPorts, p)
+					}
+				}
+			}
+		}
+		return res, nil
+	}
+
+	// 2. Detección Dockerfile
+	if hasDockerfile != "" {
+		res.Type = ProjectDockerfile
+		res.Evidence = append(res.Evidence, hasDockerfile)
+
+		content, err := os.ReadFile(filepath.Join(r.Workdir, hasDockerfile))
+		if err == nil {
+			matches := exposeRegex.FindAllStringSubmatch(string(content), -1)
+			for _, m := range matches {
+				if len(m) > 1 {
+					if p, err := strconv.Atoi(m[1]); err == nil {
+						res.DetectedPorts = append(res.DetectedPorts, p)
+					}
+				}
+			}
+		}
+		return res, nil
+	}
+
+	// 3. Detección Sitio Estático
+	if hasIndexHTML != "" {
+		// Si tiene package.json, verificar si es un proyecto de build (Vite/React) o estático puro
+		if hasPackageJSON != "" {
+			pkgContent, _ := os.ReadFile(filepath.Join(r.Workdir, hasPackageJSON))
+			if strings.Contains(string(pkgContent), "vite") || strings.Contains(string(pkgContent), "react-scripts") {
+				res.Evidence = append(res.Evidence, "package.json (Vite/React frontend)")
+			}
+		}
+		res.Type = ProjectStatic
+		res.Evidence = append(res.Evidence, hasIndexHTML)
+		res.DetectedPorts = []int{80}
+		return res, nil
+	}
+
+	res.Type = ProjectUnknown
+	return res, nil
 }
 
 func progressWriter(verbose bool) *os.File {

@@ -6,26 +6,30 @@ import (
 	"os"
 
 	"sammcore-deployer/api"
-	"sammcore-deployer/cli"
+
+	"github.com/joho/godotenv"
 )
 
 func main() {
-	// CLI
-	if len(os.Args) > 1 && os.Args[1][0] == '-' {
-		cli.Run()
-		return
-	}
-
-	// API
-	r := api.NewRouter()
+	_ = godotenv.Load()
 
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "8080"
 	}
-	log.Printf("🚀 sammcore-deployer API escuchando en http://localhost:%s", port)
 
+	// Validación de seguridad: no permitir arrancar sin DEPLOYER_API_KEY
+	// a menos que se declare explícitamente ALLOW_INSECURE_DEV=true
+	apiKey := os.Getenv("DEPLOYER_API_KEY")
+	allowInsecure := os.Getenv("ALLOW_INSECURE_DEV") == "true"
+	if apiKey == "" && !allowInsecure {
+		log.Fatalf("FATAL: DEPLOYER_API_KEY no está configurada en el entorno. Para arrancar en modo inseguro de desarrollo local, defina ALLOW_INSECURE_DEV=true.")
+	}
+
+	r := api.NewRouter()
+
+	log.Printf("Iniciando SAMMCORE-Deployer API en el puerto %s...", port)
 	if err := http.ListenAndServe(":"+port, r); err != nil {
-		log.Fatalf("❌ Error iniciando servidor: %v", err)
+		log.Fatalf("Error al iniciar el servidor: %v", err)
 	}
 }

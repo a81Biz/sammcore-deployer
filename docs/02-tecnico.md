@@ -28,16 +28,21 @@ flowchart TD
             APIPod["Pod API / Backend"]
             DBSecret["Secret (<proyecto>-db-secrets)"]
         end
+
+        subgraph BuildsNS["namespace: deployer-builds"]
+            KanikoJob["Job de Compilación (Kaniko)"]
+        end
     end
 
     HostNGINX -->|HTTP plano NodePort 30080| IngressController
     IngressController -->|/api| BackendPod
     IngressController -->|/| FrontendPod
     IngressController -->|<proyecto>.sammcore.local| WebPod
-    IngressController -->|api.<proyecto>.sammcore.local| APIPod
+    IngressController -->|<proyecto>-api.sammcore.local| APIPod
 
     BackendPod -->|Montaje PVC /data| PVCData
     BackendPod -->|Aprovisiona DB y Rol| PostgresEngine
+    BackendPod -->|Lanza Builds aislados| KanikoJob
     BackendPod -->|Aplica manifests y secrets| ProjectNS
     DBSecret -.->|Inyecta env vars| APIPod
     APIPod -->|Queries SQL| PostgresEngine
@@ -49,63 +54,78 @@ flowchart TD
 
 ### Estado Actual en el Repositorio (Hito 4.0 Completado):
 * **Backend:**  
-  - Prefijo unificado `/api` y middleware de autenticación `Authorization: Bearer <DEPLOYER_API_KEY>`.
-  - CORS con lista blanca (`https://deployer.sammcore.local`, `http://localhost:5173`, `http://localhost:8080`).
-  - Detección de 3 arquetipos: `compose`, `dockerfile` y `static` (vía `index.html`).
-  - Higiene de disco con `defer os.RemoveAll(rm.Workdir)` tras análisis.
-  - Persistencia de proyectos en `DATA_DIR/history.json` respaldada por PVC de 2Gi.
-  - Validación de URL con expresión regular y sanitización de nombres bajo RFC 1123.
-* **Frontend:** Interfaz React/Vite con ruteo a `/api`.
-* **CI/CD & Manifiestos:** Dockerfiles multi-stage, `rbac.yaml` corregido (`rbac.authorization.k8s.io`), `pvc.yaml` y pruebas unitarias passing.
+  - Prefijo unificado `/api` con middleware de autenticación estricta `Authorization: Bearer <DEPLOYER_API_KEY>` (usando `subtle.ConstantTimeCompare`) y aborto al inicio si no está configurada (salvo `ALLOW_INSECURE_DEV=true`).
+  - Eliminación absoluta de alias no autenticados en el router raíz.
+  - CORS con lista blanca configurable vía `ALLOWED_ORIGINS` y cabecera `Vary: Origin`.
+  - Detección de 3 arquetipos (`compose`, `dockerfile`, `static`) acotada a la raíz del repositorio.
+  - Detección real de base de datos en compose (mediante imágenes `postgres`/`mysql` o variables `DB_HOST`).
+  - Higiene de disco estricta con `defer os.RemoveAll(rm.Workdir)` en clonado.
+  - Persistencia atómica (`.tmp` + `os.Rename`) con exclusión mutua unificada en `DATA_DIR/history.json`.
+  - Stubs `501 Not Implemented` en `/api/deploy`, `/api/projects/{id}` (DELETE) y `redeploy` para no emitir falsos éxitos.
+  - Pruebas unitarias de router y repo_manager pasando con `go test`.
+* **Frontend:**  
+  - Consumo de `/api/projects`, captura y almacenamiento de clave API en `localStorage` vía modal en Navbar.
+* **Manifiestos K8s:**  
+  - `rbac.yaml` corregido con `apiGroup: rbac.authorization.k8s.io`.
+  - `backend.yaml` con `strategy: Recreate`, `imagePullPolicy: Always` y límites de `ephemeral-storage`.
+  - `pvc.yaml` creado y `secret.example.yaml` aislado en `manifests/examples/`.
 
 ### Estado Objetivo (Hitos 4.1 a 4.5):
-* `services/db_manager.go`: Conexión administrativa a Supabase PostgreSQL y aprovisionamiento idempotente del Modelo A.
+* `services/db_manager.go`: Conexión administrativa a Supabase PostgreSQL y aprovisionamiento idempotente de 4 casos (Modelo A).
 * `services/secret_manager.go`: Creación en memoria de Kubernetes Secrets vía `client-go`.
-* `services/template_manager.go`: Motor de renderizado de manifiestos K8s para los 3 arquetipos.
-* `services/deploy_manager.go`: Orquestador que aplica recursos en K3s y monitorea el estado del rollout.
+* `services/template_manager.go`: Renderizado de manifiestos con single-level subdomains (`<proyecto>-api.sammcore.local`) y LimitRange.
+* `services/deploy_manager.go`: Orquestador asíncrono que aplica recursos en K3s y reporta estado del rollout.
 
 ---
 
 ## 3. 📡 Contrato Unificado de la API REST
 
-Todos los endpoints exponen el prefijo `/api` y requieren el header `Authorization: Bearer <DEPLOYER_API_KEY>` para operaciones de mutación y lectura de logs:
+Todos los endpoints mutables requieren el header `Authorization: Bearer <DEPLOYER_API_KEY>`:
 
-| Método | Endpoint | Descripción | Body / Parámetros |
+| Método | Endpoint | Código Éxito | Descripción |
 | :--- | :--- | :--- | :--- |
-| `GET` | `/api/health` | Healthcheck (Público) | Ninguno |
-| `GET` | `/metrics` | Métricas Prometheus (Público) | Ninguno |
-| `POST` | `/api/analyzeRepo` | Clona, analiza arquetipo y puertos | `{"repo": "...", "branch": "..."}` |
-| `POST` | `/api/deploy` | Aprovisiona BD, renderiza y aplica en K8s | Payload detallado abajo |
-| `GET` | `/api/projects` | Lista el catálogo de proyectos | Ninguno |
-| `GET` | `/api/projects/:id` | Consulta estado en vivo de K8s | `id` en URL |
-| `GET` | `/api/projects/:id/logs` | Retorna los logs del pod principal | `id` en URL |
-| `POST` | `/api/projects/:id/redeploy` | Reinicia el despliegue | `id` en URL |
-| `DELETE` | `/api/projects/:id` | Elimina namespace y opcionalmente la BD | `?delete_db=true\|false` |
+| `GET` | `/api/health` | `200 OK` | Liveness y readiness probe (Público) |
+| `GET` | `/metrics` | `200 OK` | Métricas Prometheus (Público) |
+| `POST` | `/api/analyzeRepo` | `200 OK` | Clona y detecta arquetipo, puertos y BD |
+| `POST` | `/api/deploy` | `202 Accepted` | Inicia despliegue asíncrono en K3s (Hito 4.4) |
+| `GET` | `/api/projects` | `200 OK` | Catálogo de proyectos registrados |
+| `GET` | `/api/projects/:id` | `200 OK` | Estado en vivo de pods, servicios y rollout |
+| `GET` | `/api/projects/:id/logs` | `200 OK` | Logs recientes del pod principal |
+| `POST` | `/api/projects/:id/redeploy` | `202 Accepted` | Reinicia o re-aplica el despliegue |
+| `DELETE` | `/api/projects/:id` | `200 OK` | Destruye namespace y condicionalmente la BD |
 
 ### 🔹 Payload de `POST /api/deploy`
 ```json
 {
+  "name": "backroom",
   "repo": "https://github.com/a81Biz/backroom",
   "branch": "master",
-  "name": "backroom",
   "type": "compose",
   "requires_database": true,
-  "image": "ghcr.io/a81biz/backroom-web:latest",
+  "web_image": "ghcr.io/a81biz/backroom-web:latest",
   "api_image": "ghcr.io/a81biz/backroom-api:latest",
   "web_port": 80,
   "api_port": 8000,
   "build_args": {
-    "VITE_API_BASE": "https://api.backroom.sammcore.local"
+    "VITE_API_BASE": "https://backroom-api.sammcore.local"
   }
 }
 ```
 
-* **Derivación de `name`:** Se extrae del último segmento de la URL de GitHub, sanitizado bajo RFC 1123 (`[a-z0-9-]`, max 35 caracteres). Si el usuario lo modifica en la UI, se valida contra la lista de nombres reservados.
-* **Detección de Puertos:** `RepoManager` detecta puertos expuestos en `docker-compose.yml` (`ports` / `expose`) o `EXPOSE` en Dockerfile, proponiendo valores predeterminados editables por el desarrollador antes de desplegar.
+### 🔹 Modelo de Error Uniforme
+```json
+{
+  "status": "error",
+  "error": "Descripción amigable del error",
+  "code": "INVALID_ARGUMENT | UNAUTHORIZED | NOT_FOUND | CONFLICT | NOT_IMPLEMENTED | INTERNAL"
+}
+```
 
 ---
 
-## 4. 🐳 Compilación de Imágenes (K3s sin socket de Docker)
+## 4. 🐳 Compilación de Imágenes Aislada (Kaniko)
 
-1. **Vía Principal (GitOps / CI en repo cliente):** El pipeline del cliente compila y sube a GHCR. El Deployer aplica los manifiestos con `imagePullSecrets: [{name: sammcore-registry-secret}]`.
-2. **Vía In-Cluster (Kaniko Job):** El Deployer ejecuta un Job efímero de Kaniko que descarga el código y compila en K3s sin requerir privilegios de root ni Docker daemon.
+Para evitar agotar la `ResourceQuota` de la aplicación durante la compilación, los builds in-cluster de Kaniko se ejecutan en un namespace dedicado: `deployer-builds`:
+* Cuenta con su propia cuota de compilación (hasta 4 CPU y 4Gi RAM).
+* Utiliza el secreto `kaniko-registry-secret` para autenticarse con GHCR.
+* Finalizado el build, el pod de Kaniko es purgado automáticamente mediante `ttlSecondsAfterFinished: 120`.

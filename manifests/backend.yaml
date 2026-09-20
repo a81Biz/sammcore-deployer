@@ -7,6 +7,8 @@ metadata:
     app: deployer-backend
 spec:
   replicas: 1
+  strategy:
+    type: Recreate # Garantiza un único pod escribiendo sobre el PVC /data
   selector:
     matchLabels:
       app: deployer-backend
@@ -19,7 +21,7 @@ spec:
       containers:
         - name: backend
           image: ghcr.io/a81biz/sammcore-deployer-backend:latest
-          imagePullPolicy: IfNotPresent
+          imagePullPolicy: Always # Siempre descargar la versión más reciente en re-despliegues
           ports:
             - name: http
               containerPort: 8080
@@ -28,6 +30,8 @@ spec:
               value: "8080"
             - name: DATA_DIR
               value: "/data"
+            - name: ALLOWED_ORIGINS
+              value: "https://deployer.sammcore.local,http://localhost:5173"
             - name: DEPLOYER_API_KEY
               valueFrom:
                 secretKeyRef:
@@ -73,9 +77,11 @@ spec:
             requests:
               cpu: 50m
               memory: 64Mi
+              ephemeral-storage: 250Mi
             limits:
               cpu: 500m
-              memory: 256Mi
+              memory: 512Mi
+              ephemeral-storage: 2Gi
       volumes:
         - name: data-volume
           persistentVolumeClaim:

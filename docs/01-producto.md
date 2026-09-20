@@ -19,46 +19,46 @@ El Deployer clasifica y gestiona tres naturalezas de proyectos:
 1. **Stack Multi-Servicio (`compose`):**
    - Repositorios con `docker-compose.yml` que contienen frontend web y backend API (ej. `backroom`).
    - Si declaran un servicio de base de datos (`postgres`, `mysql`), este se sustituye automáticamente por una base lógica dedicada en el clúster central de **Supabase PostgreSQL (Modelo A)**.
-   - Enrutamiento dinámico multi-host: `https://<proyecto>.sammcore.local` para la interfaz web y `https://api.<proyecto>.sammcore.local` para la API REST.
+   - **Enrutamiento compatible con Wildcard TLS (`*.sammcore.local`):**  
+     Dado que los certificados wildcard TLS estándar cubren un único nivel de dominio (`*.sammcore.local`), el enrutamiento se define como:
+     - **Web UI:** `https://<proyecto>.sammcore.local`
+     - **Backend API:** `https://<proyecto>-api.sammcore.local` (o subpath proxy `https://<proyecto>.sammcore.local/api/`).
 2. **Microservicio Individual (`dockerfile`):**
    - Repositorios con un único `Dockerfile` (Go, Node.js, Python, Rust).
    - Genera un `Deployment`, un `Service` ClusterIP y un `Ingress` bajo `https://<proyecto>.sammcore.local`.
    - Si requiere base de datos, se aprovisiona bajo demanda en Supabase.
 3. **Sitios Web Estáticos (`static`):**
-   - Repositorios basados en HTML/JS o proyectos SPA (React, Vue) que publican su directorio `dist`/`public` mediante un servidor NGINX optimizado.
+   - Repositorios basados en HTML/JS puro que publican su directorio `dist`/`public` mediante un servidor NGINX optimizado.
 
 ---
 
-## 4. 🧭 Flujo de Trabajo del Usuario
-```mermaid
-sequenceDiagram
-    autonumber
-    actor Dev as Desarrollador
-    participant UI as Deployer UI (React)
-    participant API as Deployer API (Go)
-    participant K8s as Clúster K3s
-    participant DB as Supabase PostgreSQL
+## 4. 📄 Contrato de Aplicación Opcional: `sammcore.yaml`
+Para evitar depender exclusivamente de heurísticas automáticas de puertos y nombres, un repositorio puede incluir opcionalmente en su raíz un archivo `sammcore.yaml` que actúa como fuente de verdad determinista:
 
-    Dev->>UI: Ingresa URL de GitHub (ej. a81Biz/backroom) y rama
-    UI->>API: POST /api/analyzeRepo
-    API->>API: Clona temporalmente, detecta arquetipo y puertos
-    API->>API: Limpia directorio temporal (defer os.RemoveAll)
-    API-->>UI: Retorna tipo de proyecto y requerimientos (BD, puertos)
-    
-    Dev->>UI: Confirma parámetros y pulsa "Desplegar"
-    UI->>API: POST /api/deploy
-    alt Requiere Base de Datos
-        API->>DB: Aprovisiona <proyecto>_db y <proyecto>_user (Modelo A)
-        API->>K8s: Inyecta Secret (<proyecto>-db-secrets en memoria)
-    end
-    API->>K8s: Aplica ResourceQuota, NetworkPolicy, Deployments, Services e Ingress
-    API-->>UI: Estado "running" con URLs públicas
-    Dev->>UI: Accede a https://<proyecto>.sammcore.local y https://api.<proyecto>.sammcore.local
+```yaml
+version: "1"
+name: backroom
+type: compose
+database:
+  required: true
+  type: postgres
+services:
+  web:
+    port: 80
+    subdomain: backroom
+    healthCheck: /
+  api:
+    port: 8000
+    subdomain: backroom-api
+    healthCheck: /health
+env:
+  VITE_API_BASE: "https://backroom-api.sammcore.local"
 ```
+Si `sammcore.yaml` está presente, el Deployer respeta estrictamente sus definiciones; en su ausencia, aplica las heurísticas automáticas de detección.
 
 ---
 
 ## 5. 🛡️ Principios No Negociables
 * **Cero Contraseñas en Repositorio:** Toda credencial se genera criptográficamente en memoria y se inyecta directamente como `Secret` de Kubernetes.
 * **Persistencia Centralizada (Modelo A):** No se levantan contenedores de base de datos dispersos por proyecto. Se utiliza la instancia horizontal de Supabase con almacenamiento NVMe persistente.
-* **Enrutamiento Dinámico Total:** El NGINX del host resuelve mediante wildcard `*.sammcore.local` hacia el Ingress Controller de K3s. Ningún despliegue nuevo requiere editar archivos en el host físico ni reiniciar servicios.
+* **Enrutamiento Dinámico de Nivel Único:** Se utilizan subdominios compatibles con el wildcard TLS `*.sammcore.local` (`<proyecto>.sammcore.local` y `<proyecto>-api.sammcore.local`).

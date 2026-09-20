@@ -1,6 +1,6 @@
 # 📄 Seguridad, Gobernanza y Operación – SAMMCORE Deployer
 
-Este documento formaliza las políticas de seguridad, gobernanza de recursos, convenciones de nombres y el manual de bootstrap del `sammcore-deployer`.
+Este documento formaliza las políticas de seguridad, gobernanza de recursos, convenciones de nombres, la matriz completa de variables de entorno y el manual de bootstrap del `sammcore-deployer`.
 
 ---
 
@@ -12,16 +12,14 @@ Este documento formaliza las políticas de seguridad, gobernanza de recursos, co
   Authorization: Bearer <DEPLOYER_API_KEY>
   ```
   - Endpoints Protegidos: `POST /api/analyzeRepo`, `POST /api/deploy`, `DELETE /api/projects/:id`, `POST /api/projects/:id/redeploy`, `GET /api/projects/:id/logs`.
-  - Endpoints Públicos de Liveness: `GET /api/health`, `GET /metrics`.
+  - Endpoints Públicos de Diagnóstico: `GET /api/health`, `GET /metrics`.
 * **Manejo en la UI (React/Vite):**  
-  Para evitar exponer la clave en el bundle estático compilado (`VITE_*`), la UI solicita la clave al desarrollador en su primera visita mediante una modal segura y la almacena localmente en `localStorage` del navegador (`deployer_api_key`), inyectándola dinámicamente en los headers de cada llamada a `/api/*`.
+  La UI solicita la clave al desarrollador en su primera visita mediante una modal o botón en el Navbar y la almacena localmente en `localStorage` del navegador (`sammcore_deployer_api_key`), inyectándola dinámicamente en los headers de cada llamada a `/api/*`.
 
 ### 🔹 1.2. Política de CORS (Cross-Origin Resource Sharing)
-* Orígenes explícitamente autorizados en el middleware:
-  - `https://deployer.sammcore.local` (interfaz en producción).
-  - `http://localhost:5173` (desarrollo local de Vite).
-  - `http://localhost:8080` (pruebas locales de backend).
-* Toda petición con un origen fuera de esta lista blanca es rechazada.
+* Orígenes explícitamente autorizados mediante la variable `ALLOWED_ORIGINS` (con cabecera `Vary: Origin`):
+  - Predeterminado: `https://deployer.sammcore.local,http://localhost:5173`.
+* Toda petición con un origen fuera de esta lista blanca no recibe cabeceras CORS y las peticiones de preflight `OPTIONS` son rechazadas con código `403 Forbidden`.
 
 ### 🔹 1.3. Validación de Entrada y Repositorios
 * **URL de Repositorio:** Exclusivamente URLs HTTPS válidas que coincidan con la expresión regular:
@@ -46,7 +44,29 @@ El identificador de proyecto (`projectName`) rige la denominación de los recurs
 
 ---
 
-## 3. 🚀 Manual de Bootstrap (Despliegue Inicial de Infraestructura)
+## 3. 📋 Matriz Completa de Variables de Entorno
+
+### Backend (`deployer-backend`):
+| Variable | Requerida | Descripción | Valor Predeterminado / Ejemplo |
+| :--- | :---: | :--- | :--- |
+| `PORT` | Sí | Puerto de escucha HTTP del servidor Go | `8080` |
+| `DEPLOYER_API_KEY` | Sí | Clave maestra para autorizar llamadas a la API | Inyectada vía Secret |
+| `ALLOW_INSECURE_DEV`| No | Permite arrancar sin API key en desarrollo | `false` |
+| `ALLOWED_ORIGINS` | No | Lista blanca de orígenes CORS separados por coma | `https://deployer.sammcore.local,http://localhost:5173` |
+| `DATA_DIR` | Sí | Directorio persistente para `history.json` (en PVC) | `/data` |
+| `GITHUB_TOKEN` | No | Token de GitHub para aumentar cuota de API | Inyectado vía Secret |
+| `SUPABASE_HOST` | Sí | Host interno de PostgreSQL | `postgres.supabase.svc.cluster.local` |
+| `SUPABASE_PORT` | Sí | Puerto de PostgreSQL | `5432` |
+| `SUPABASE_POSTGRES_PASSWORD` | Sí | Contraseña administrativa de Postgres | Inyectada vía Secret |
+
+### Frontend (`deployer-frontend`):
+| Variable | Requerida | Descripción | Valor Predeterminado / Ejemplo |
+| :--- | :---: | :--- | :--- |
+| `VITE_API_BASE` | Sí | Prefijo base para peticiones HTTP al backend | `/api` |
+
+---
+
+## 4. 🚀 Manual de Bootstrap (Paso a Paso)
 
 Para instalar el deployer desde cero en un clúster K3s nuevo, el administrador ejecuta:
 
@@ -57,8 +77,12 @@ kubectl apply -f manifests/namespace.yaml
 # 2. Extraer la contraseña maestra de PostgreSQL en Supabase
 SUPABASE_PASS=$(kubectl get secret supabase-postgres-secret -n supabase -o jsonpath='{.data.POSTGRES_PASSWORD}' | base64 -d)
 
-# 3. Generar clave criptográfica para el deployer
+# 3. Generar clave criptográfica para el deployer y mostrarla al administrador
 API_KEY=$(openssl rand -hex 16)
+echo "======================================================"
+echo "DEPLOYER_API_KEY GENERADA: $API_KEY"
+echo "Guarde esta clave para configurar su navegador en la UI"
+echo "======================================================"
 
 # 4. Crear Secret del Deployer
 kubectl create secret generic deployer-secrets -n deployer \
@@ -75,30 +99,38 @@ kubectl apply -f manifests/pvc.yaml
 kubectl apply -f manifests/backend.yaml
 kubectl apply -f manifests/frontend.yaml
 kubectl apply -f manifests/ingress.yaml
+
+# 7. Verificación Post-Bootstrap
+echo "Verificando pods..."
+kubectl get pods -n deployer -w
 ```
 
 ---
 
-## 4. 💻 Guía de Desarrollo Local con Port-Forwarding
-
-Para desarrollar localmente sin exponer la base de datos a la LAN física:
+## 5. 🔍 Comandos de Verificación Post-Bootstrap
 
 ```bash
-# 1. Crear túnel seguro al PostgreSQL de Supabase en el clúster
-kubectl port-forward svc/postgres 5432:5432 -n supabase
+# 1. Healthcheck público (debe responder {"status":"ok"})
+curl -k https://deployer.sammcore.local/api/health
 
-# 2. Iniciar el Backend (Go 1.23)
-cd sammcore-deployer/backend
-export PORT=8080
-export DEPLOYER_API_KEY="test-secret-key"
-export SUPABASE_HOST="127.0.0.1" # Conecta a través del túnel local
-export SUPABASE_PORT="5432"
-export SUPABASE_POSTGRES_PASSWORD="<password_de_supabase>"
-export DATA_DIR="./data"
-go run .
+# 2. Verificar rechazo sin autenticación (debe retornar 401)
+curl -k -i -X POST https://deployer.sammcore.local/api/analyzeRepo
 
-# 3. Iniciar el Frontend (React/Vite)
-cd ../frontend
-npm install
-npm run dev # Disponible en http://localhost:5173
+# 3. Verificar llamada autenticada exitosa
+curl -k -X POST https://deployer.sammcore.local/api/analyzeRepo \
+  -H "Authorization: Bearer $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"repo":"https://github.com/a81Biz/backroom","branch":"master"}'
 ```
+
+---
+
+## 6. 🛠️ Guía de Troubleshooting por Estado del Proyecto
+
+| Estado | Síntoma Típico | Causa Probable | Acción Correctiva |
+| :--- | :--- | :--- | :--- |
+| `analyzed` | Análisis falla inmediatamente | URL inválida o repositorio privado sin token | Verificar formato HTTPS o inyectar `GITHUB_TOKEN` en `deployer-secrets`. |
+| `provisioning_db` | Bloqueado en creación de BD | Host de PostgreSQL inaccesible o contraseña incorrecta | Verificar conectividad a `postgres.supabase.svc.cluster.local:5432` y revisar `SUPABASE_POSTGRES_PASSWORD`. |
+| `building_image` | Job de Kaniko en CrashLoopBackOff | Fallo de sintaxis en Dockerfile o credenciales GHCR inválidas | Inspeccionar logs del Job en `deployer-builds`: `kubectl logs job/kaniko-build-<proyecto> -n deployer-builds`. |
+| `deploying_k8s` | Pods en `Pending` | Cuota de recursos agotada o falta de memoria en nodo | Revisar eventos del namespace: `kubectl describe resourcequota -n <proyecto>`. |
+| `failed` | Pods en `CrashLoopBackOff` | Fallo de conexión a BD o variables de entorno faltantes | Consultar logs del pod de la app: `kubectl logs deploy/<proyecto>-api -n <proyecto>`. |

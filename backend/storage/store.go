@@ -46,10 +46,8 @@ func getHistoryFile() string {
 	return filepath.Join(dir, "history.json")
 }
 
-func LoadProjects() ([]Project, error) {
-	mu.Lock()
-	defer mu.Unlock()
-
+// loadProjectsUnsafe lee sin bloquear; debe ser llamado con mu.Lock activo
+func loadProjectsUnsafe() ([]Project, error) {
 	filePath := getHistoryFile()
 	if _, err := os.Stat(filePath); os.IsNotExist(err) {
 		return []Project{}, nil
@@ -68,26 +66,73 @@ func LoadProjects() ([]Project, error) {
 	return projects, nil
 }
 
-func SaveProjects(projects []Project) error {
-	mu.Lock()
-	defer mu.Unlock()
-
+// saveProjectsAtomic guarda de forma atómica usando archivo temporal y rename
+func saveProjectsAtomic(projects []Project) error {
 	data, err := json.MarshalIndent(projects, "", "  ")
 	if err != nil {
 		return err
 	}
 
-	return os.WriteFile(getHistoryFile(), data, 0644)
+	targetFile := getHistoryFile()
+	tmpFile := targetFile + ".tmp"
+
+	if err := os.WriteFile(tmpFile, data, 0644); err != nil {
+		return err
+	}
+
+	// Rename es atómico en POSIX y reemplaza el archivo destino de forma segura
+	return os.Rename(tmpFile, targetFile)
 }
 
-func AddProject(p Project) error {
-	projects, _ := LoadProjects()
-	projects = append(projects, p)
-	return SaveProjects(projects)
+func LoadProjects() ([]Project, error) {
+	mu.Lock()
+	defer mu.Unlock()
+	return loadProjectsUnsafe()
+}
+
+func SaveProjects(projects []Project) error {
+	mu.Lock()
+	defer mu.Unlock()
+	return saveProjectsAtomic(projects)
+}
+
+func AddOrUpdateProject(p Project) error {
+	mu.Lock()
+	defer mu.Unlock()
+
+	projects, err := loadProjectsUnsafe()
+	if err != nil {
+		projects = []Project{}
+	}
+
+	updated := false
+	for i, existing := range projects {
+		if existing.ID == p.ID || existing.Repo == p.Repo {
+			p.ID = existing.ID
+			p.CreatedAt = existing.CreatedAt
+			p.UpdatedAt = time.Now()
+			projects[i] = p
+			updated = true
+			break
+		}
+	}
+
+	if !updated {
+		projects = append(projects, p)
+	}
+
+	return saveProjectsAtomic(projects)
 }
 
 func GetProject(id string) (*Project, error) {
-	projects, _ := LoadProjects()
+	mu.Lock()
+	defer mu.Unlock()
+
+	projects, err := loadProjectsUnsafe()
+	if err != nil {
+		return nil, err
+	}
+
 	for _, p := range projects {
 		if p.ID == id {
 			return &p, nil
@@ -97,12 +142,20 @@ func GetProject(id string) (*Project, error) {
 }
 
 func DeleteProject(id string) error {
-	projects, _ := LoadProjects()
+	mu.Lock()
+	defer mu.Unlock()
+
+	projects, err := loadProjectsUnsafe()
+	if err != nil {
+		return err
+	}
+
 	filtered := []Project{}
 	for _, p := range projects {
 		if p.ID != id {
 			filtered = append(filtered, p)
 		}
 	}
-	return SaveProjects(filtered)
+
+	return saveProjectsAtomic(filtered)
 }
