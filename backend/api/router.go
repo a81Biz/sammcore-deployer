@@ -304,12 +304,10 @@ func redeployHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Re-verificar commit si no estaba guardado
-	if p.Commit == "" {
-		analyzed := core.Analyze(core.AnalyzeRequest{Repo: p.Repo, Branch: p.Branch})
-		if analyzed.Status == "ok" && analyzed.Commit != "" {
-			p.Commit = analyzed.Commit
-		}
+	// Obtener el último commit de la rama en GitHub para el re-despliegue
+	analyzed := core.Analyze(core.AnalyzeRequest{Repo: p.Repo, Branch: p.Branch})
+	if analyzed.Status == "ok" && analyzed.Commit != "" {
+		p.Commit = analyzed.Commit
 	}
 
 	totalSteps := 3
