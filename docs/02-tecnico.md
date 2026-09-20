@@ -52,23 +52,26 @@ flowchart TD
 
 ## 2. 📂 Estado Actual vs Estado Objetivo
 
-### Estado Actual en el Repositorio (Hito 4.0 Completado):
+### Estado Actual en el Repositorio (Hito 4.0 Consolidado):
 * **Backend:**  
   - Prefijo unificado `/api` con middleware de autenticación estricta `Authorization: Bearer <DEPLOYER_API_KEY>` (usando `subtle.ConstantTimeCompare`) y aborto al inicio si no está configurada (salvo `ALLOW_INSECURE_DEV=true`).
   - Eliminación absoluta de alias no autenticados en el router raíz.
   - CORS con lista blanca configurable vía `ALLOWED_ORIGINS` y cabecera `Vary: Origin`.
-  - Detección de 3 arquetipos (`compose`, `dockerfile`, `static`) acotada a la raíz del repositorio.
-  - Detección real de base de datos en compose (mediante imágenes `postgres`/`mysql` o variables `DB_HOST`).
-  - Higiene de disco estricta con `defer os.RemoveAll(rm.Workdir)` en clonado.
-  - Persistencia atómica (`.tmp` + `os.Rename`) con exclusión mutua unificada en `DATA_DIR/history.json`.
-  - Stubs `501 Not Implemented` en `/api/deploy`, `/api/projects/{id}` (DELETE) y `redeploy` para no emitir falsos éxitos.
-  - Pruebas unitarias de router y repo_manager pasando con `go test`.
+  - **Análisis No Persistente:** `POST /api/analyzeRepo` es estrictamente de solo lectura; devuelve un `AnalyzePlan` sin tocar `history.json` ni reiniciar aplicaciones en ejecución.
+  - **Detección YAML Estructurada:** Parseo de `docker-compose.yml`, `docker-compose.yaml`, `compose.yml` y `compose.yaml` mediante `gopkg.in/yaml.v3` para extraer puertos reales de contenedor (target) y dependencias de BD sin falsos positivos por comentarios.
+  - **Clonado Seguro:** Timeout de 2 minutos vía `context.WithTimeout` y rechazo explícito si se solicita una rama específica inexistente (sin fallback silencioso).
+  - **Identificadores Deterministas:** IDs calculados a partir de `owner-repo` y sanitización que previene colisiones con subdominios (`-api`, `-docs`) o nombres reservados.
+  - **Protección contra Corrupción:** Detección de JSON corrupto en `history.json` con respaldo automático en `history.json.corrupt.<timestamp>` y propagación de errores para no sobreescribir datos.
+  - **Stubs 501 Not Implemented:** `/api/deploy`, `/api/projects/{id}` (DELETE), `/api/projects/{id}/logs` y `redeploy` responden 501 con modelo de error uniforme `{"status":"error","error":"...","code":"NOT_IMPLEMENTED"}`.
+  - Pruebas unitarias de router, core analyzer, storage y repo_manager pasando con `go test`.
 * **Frontend:**  
-  - Consumo de `/api/projects`, captura y almacenamiento de clave API en `localStorage` vía modal en Navbar.
+  - Consumo de `/api/projects`, captura y almacenamiento de clave API en `localStorage` vía componente modal React integrado en `Navbar` (sin popups `prompt`).
+  - Detección reactiva de errores 401 mediante evento `deployer:auth-required`.
 * **Manifiestos K8s:**  
   - `rbac.yaml` corregido con `apiGroup: rbac.authorization.k8s.io`.
   - `backend.yaml` con `strategy: Recreate`, `imagePullPolicy: Always` y límites de `ephemeral-storage`.
-  - `pvc.yaml` creado y `secret.example.yaml` aislado en `manifests/examples/`.
+  - `pvc.yaml` creado y aplicado en clúster.
+  - `builds-namespace.yaml` para aislar compilaciones de Kaniko con `ResourceQuota`, `LimitRange` y `NetworkPolicy`.
 
 ### Estado Objetivo (Hitos 4.1 a 4.5):
 * `services/db_manager.go`: Conexión administrativa a Supabase PostgreSQL y aprovisionamiento idempotente de 4 casos (Modelo A).
@@ -86,15 +89,31 @@ Todos los endpoints mutables requieren el header `Authorization: Bearer <DEPLOYE
 | :--- | :--- | :--- | :--- |
 | `GET` | `/api/health` | `200 OK` | Liveness y readiness probe (Público) |
 | `GET` | `/metrics` | `200 OK` | Métricas Prometheus (Público) |
-| `POST` | `/api/analyzeRepo` | `200 OK` | Clona y detecta arquetipo, puertos y BD |
+| `POST` | `/api/analyzeRepo` | `200 OK` | Clona e inspecciona repositorio de forma determinista (Read-Only) |
 | `POST` | `/api/deploy` | `202 Accepted` | Inicia despliegue asíncrono en K3s (Hito 4.4) |
 | `GET` | `/api/projects` | `200 OK` | Catálogo de proyectos registrados |
 | `GET` | `/api/projects/:id` | `200 OK` | Estado en vivo de pods, servicios y rollout |
-| `GET` | `/api/projects/:id/logs` | `200 OK` | Logs recientes del pod principal |
+| `GET` | `/api/projects/:id/logs` | `200 OK` | Logs recientes del pod principal (501 en Hito 4.0) |
 | `POST` | `/api/projects/:id/redeploy` | `202 Accepted` | Reinicia o re-aplica el despliegue |
-| `DELETE` | `/api/projects/:id` | `200 OK` | Destruye namespace y condicionalmente la BD |
+| `DELETE` | `/api/projects/:id` | `200 OK` | Destruye namespace y condicionalmente la BD (`?delete_db=true`) |
 
-### 🔹 Payload de `POST /api/deploy`
+### 🔹 Respuesta de Inspección: `POST /api/analyzeRepo` (`AnalyzePlan`)
+```json
+{
+  "status": "ok",
+  "id": "a81biz-backroom",
+  "name": "backroom",
+  "type": "compose",
+  "branch": "master",
+  "domain": "backroom.sammcore.local",
+  "api_domain": "backroom-api.sammcore.local",
+  "requires_database": true,
+  "detected_ports": [80, 8000],
+  "evidence": ["docker-compose.yml"]
+}
+```
+
+### 🔹 Payload de Solicitud de Despliegue: `POST /api/deploy`
 ```json
 {
   "name": "backroom",
@@ -126,6 +145,6 @@ Todos los endpoints mutables requieren el header `Authorization: Bearer <DEPLOYE
 ## 4. 🐳 Compilación de Imágenes Aislada (Kaniko)
 
 Para evitar agotar la `ResourceQuota` de la aplicación durante la compilación, los builds in-cluster de Kaniko se ejecutan en un namespace dedicado: `deployer-builds`:
-* Cuenta con su propia cuota de compilación (hasta 4 CPU y 4Gi RAM).
+* Cuenta con su propia cuota de compilación (hasta 4 CPU y 4Gi RAM delimitados en `manifests/builds-namespace.yaml`).
 * Utiliza el secreto `kaniko-registry-secret` para autenticarse con GHCR.
 * Finalizado el build, el pod de Kaniko es purgado automáticamente mediante `ttlSecondsAfterFinished: 120`.

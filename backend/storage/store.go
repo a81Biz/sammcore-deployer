@@ -3,8 +3,10 @@ package storage
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 )
@@ -58,9 +60,16 @@ func loadProjectsUnsafe() ([]Project, error) {
 		return nil, err
 	}
 
+	// Si el archivo está completamente vacío
+	if len(strings.TrimSpace(string(data))) == 0 {
+		return []Project{}, nil
+	}
+
 	var projects []Project
 	if err := json.Unmarshal(data, &projects); err != nil {
-		return nil, err
+		corruptPath := fmt.Sprintf("%s.corrupt.%d", filePath, time.Now().Unix())
+		_ = os.WriteFile(corruptPath, data, 0644)
+		return nil, fmt.Errorf("archivo de historial corrupto (respaldado en %s): %w", corruptPath, err)
 	}
 
 	return projects, nil
@@ -102,7 +111,7 @@ func AddOrUpdateProject(p Project) error {
 
 	projects, err := loadProjectsUnsafe()
 	if err != nil {
-		projects = []Project{}
+		return err
 	}
 
 	updated := false
@@ -151,10 +160,17 @@ func DeleteProject(id string) error {
 	}
 
 	filtered := []Project{}
+	found := false
 	for _, p := range projects {
 		if p.ID != id {
 			filtered = append(filtered, p)
+		} else {
+			found = true
 		}
+	}
+
+	if !found {
+		return errors.New("proyecto no encontrado")
 	}
 
 	return saveProjectsAtomic(filtered)

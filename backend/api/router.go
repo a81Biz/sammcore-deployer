@@ -15,7 +15,23 @@ import (
 	"github.com/gorilla/mux"
 )
 
-func getAllowedOrigins() map[string]bool{
+type APIError struct {
+	Status string `json:"status"`
+	Error  string `json:"error"`
+	Code   string `json:"code,omitempty"`
+}
+
+func writeJSONError(w http.ResponseWriter, statusCode int, message string, code string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(statusCode)
+	_ = json.NewEncoder(w).Encode(APIError{
+		Status: "error",
+		Error:  message,
+		Code:   code,
+	})
+}
+
+func getAllowedOrigins() map[string]bool {
 	raw := os.Getenv("ALLOWED_ORIGINS")
 	if raw == "" {
 		raw = "https://deployer.sammcore.local,http://localhost:5173"
@@ -72,12 +88,7 @@ func authMiddleware(next http.Handler) http.Handler {
 
 		authHeader := r.Header.Get("Authorization")
 		if !strings.HasPrefix(authHeader, "Bearer ") {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusUnauthorized)
-			_ = json.NewEncoder(w).Encode(map[string]string{
-				"status": "error",
-				"error":  "Cabecera Authorization inválida. Debe tener formato 'Bearer <DEPLOYER_API_KEY>'",
-			})
+			writeJSONError(w, http.StatusUnauthorized, "Cabecera Authorization inválida. Debe tener formato 'Bearer <DEPLOYER_API_KEY>'", "UNAUTHORIZED_HEADER")
 			return
 		}
 
@@ -86,12 +97,7 @@ func authMiddleware(next http.Handler) http.Handler {
 
 		// Comparación en tiempo constante para mitigar ataques de temporización
 		if subtle.ConstantTimeCompare([]byte(token), []byte(expectedKey)) != 1 {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusUnauthorized)
-			_ = json.NewEncoder(w).Encode(map[string]string{
-				"status": "error",
-				"error":  "No autorizado: clave de API inválida",
-			})
+			writeJSONError(w, http.StatusUnauthorized, "No autorizado: clave de API inválida", "INVALID_API_KEY")
 			return
 		}
 
@@ -103,8 +109,7 @@ func listProjectsHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	projects, err := storage.LoadProjects()
 	if err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
-		_ = json.NewEncoder(w).Encode(map[string]string{"status": "error", "error": err.Error()})
+		writeJSONError(w, http.StatusInternalServerError, err.Error(), "INTERNAL_ERROR")
 		return
 	}
 	_ = json.NewEncoder(w).Encode(projects)
@@ -115,56 +120,35 @@ func getProjectHandler(w http.ResponseWriter, r *http.Request) {
 	id := mux.Vars(r)["id"]
 	p, err := storage.GetProject(id)
 	if err != nil {
-		w.WriteHeader(http.StatusNotFound)
-		_ = json.NewEncoder(w).Encode(map[string]string{"status": "error", "error": err.Error()})
+		writeJSONError(w, http.StatusNotFound, err.Error(), "PROJECT_NOT_FOUND")
 		return
 	}
 	_ = json.NewEncoder(w).Encode(p)
 }
 
 func deleteProjectHandler(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
 	// En Hito 4.0 no se simula éxito falso si no se tocan K8s ni DB
-	w.WriteHeader(http.StatusNotImplemented)
-	_ = json.NewEncoder(w).Encode(map[string]string{
-		"status": "error",
-		"error":  "Eliminación real de proyectos en K8s y PostgreSQL central pendiente de implementar en Hito 4.4",
-	})
+	writeJSONError(w, http.StatusNotImplemented, "Eliminación real de proyectos en K8s y PostgreSQL central pendiente de implementar en Hito 4.4", "NOT_IMPLEMENTED")
 }
 
 func logsHandler(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	id := mux.Vars(r)["id"]
-	_ = json.NewEncoder(w).Encode(map[string]string{
-		"id":   id,
-		"logs": "📜 Logs de pods en vivo vía K8s API client-go pendiente de implementar en Hito 4.4",
-	})
+	// Retorna 501 Not Implemented estricto en Hito 4.0
+	writeJSONError(w, http.StatusNotImplemented, "📜 Logs de pods en vivo vía K8s API client-go pendiente de implementar en Hito 4.4", "NOT_IMPLEMENTED")
 }
 
 func redeployHandler(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusNotImplemented)
-	_ = json.NewEncoder(w).Encode(map[string]string{
-		"status": "error",
-		"error":  "Re-despliegue autónomo en K8s pendiente de implementar en Hito 4.4",
-	})
+	writeJSONError(w, http.StatusNotImplemented, "Re-despliegue autónomo en K8s pendiente de implementar en Hito 4.4", "NOT_IMPLEMENTED")
 }
 
 func deployHandler(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusNotImplemented)
-	_ = json.NewEncoder(w).Encode(map[string]string{
-		"status": "error",
-		"error":  "Orquestación de despliegue en K3s (Hito 4.4) en desarrollo",
-	})
+	writeJSONError(w, http.StatusNotImplemented, "Orquestación de despliegue en K3s (Hito 4.4) en desarrollo", "NOT_IMPLEMENTED")
 }
 
 func analyzeHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	var req core.AnalyzeRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		w.WriteHeader(http.StatusBadRequest)
-		_ = json.NewEncoder(w).Encode(map[string]string{"status": "error", "error": "JSON inválido en el cuerpo de la petición"})
+		writeJSONError(w, http.StatusBadRequest, "JSON inválido en el cuerpo de la petición", "INVALID_JSON")
 		return
 	}
 	resp := core.Analyze(req)

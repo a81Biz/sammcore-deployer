@@ -42,5 +42,5 @@ Las especificaciones arquitectónicas y operativas se dividen en los siguientes 
 | **Fase 3: Frontend Inicial** | Interfaz React/Vite en `https://deployer.sammcore.local` | ✅ Completada |
 | **Hito 4.0: Alineación Contrato** | Prefijo `/api`, auth middleware, CORS estricto, static y struct ampliado | ✅ Completado |
 | **Hitos 4.1 a 4.5: Orquestación K3s** | `DatabaseManager`, `SecretManager`, `TemplateManager` y piloto Backroom | 🔄 En Desarrollo |
-| **Fase 5: Manifiestos y Dockerfiles** | Dockerfiles multi-stage, manifiestos K8s (`namespace`, `rbac`, `pvc`, `ingress`) | ✅ En Repo |
-| **Fase 6: Panel Avanzado** | Streaming de logs, dashboards en Grafana y modal de auth en UI | ⚪ Pendiente |
+| **Fase 5: Manifiestos y Dockerfiles** | Dockerfiles multi-stage, manifiestos K8s (`namespace`, `builds-namespace`, `rbac`, `pvc`, `ingress`) | ✅ En Repo |
+| **Fase 6: Panel Avanzado** | Streaming de logs, dashboards en Grafana y eliminación selectiva en UI | ⚪ Pendiente |

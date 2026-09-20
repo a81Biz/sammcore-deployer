@@ -31,7 +31,7 @@ Este documento define la trayectoria técnica del proyecto, contrastando el esta
 
 ### Tareas
 - [x] Aplicación SPA con React, TypeScript y Vite.
-- [x] Gestión de clave API en Navbar con persistencia en `localStorage`.
+- [x] Gestión de clave API en Navbar con persistencia en `localStorage` y componente modal React.
 - [x] Vista **Registrar Proyecto** (análisis con captura de clave y manejo de errores).
 - [x] Vista **Estado de Proyectos** (tabla consumiendo `/api/projects`).
 - [x] Integración de variables de entorno (`VITE_API_BASE=/api`).
@@ -41,20 +41,21 @@ Este documento define la trayectoria técnica del proyecto, contrastando el esta
 ## 🟡 Fase 4: Orquestación K3s y Supabase Modelo A (🔄 En Desarrollo)
 🎯 Objetivo: Ejecutar despliegues autónomos completos en el clúster SAMMCORE con base de datos horizontal y subdominios dinámicos.
 
-### 🔹 Hito 4.0: Alineación del Código con el Contrato (✅ Completado)
-* **Objetivo:** Refactorizar el backend y frontend para satisfacer 100% el contrato de API, seguridad y modelo de datos.
-* **Criterios de Aceptación:**
-  1. Prefijo `/api` unificado y eliminación de alias inseguros en la raíz.
-  2. Middleware de autenticación Bearer Token activo con `subtle.ConstantTimeCompare`.
-  3. Aborto del servidor al arranque si `DEPLOYER_API_KEY` está vacía (salvo `ALLOW_INSECURE_DEV=true`).
-  4. CORS estricto con lista blanca configurable y `Vary: Origin`.
-  5. Stubs `501 Not Implemented` en `/api/deploy`, `/api/projects/{id}` (DELETE) y `redeploy`.
-  6. Detección acotada a la raíz (`compose`, `dockerfile`, `static`) y extracción de puertos.
-  7. Detección real de base de datos relacional en compose.
-  8. Higiene de disco con `defer os.RemoveAll` garantizado.
-  9. Persistencia atómica (`.tmp` + rename) con mutex unificado.
-  10. UI con modal de clave en Navbar y llamadas a `/api/projects`.
-  11. `go.sum` commiteado y pruebas unitarias passing al 100%.
+### 🔹 Hito 4.0: Alineación del Código con el Contrato (✅ Completado y Verificado)
+* **Objetivo:** Refactorizar backend, frontend y manifiestos para satisfacer 100% el contrato de API, seguridad, aislamiento y modelo de datos.
+* **Criterios de Aceptación Cumplidos y Auditados:**
+  1. **Prefijo `/api` unificado:** Eliminación absoluta de rutas públicas huérfanas en el router raíz.
+  2. **Autenticación Bearer Token Falla Cerrada:** Middleware con `subtle.ConstantTimeCompare`, obligatoriedad de `Bearer `, y aborto al inicio si `DEPLOYER_API_KEY` está vacía (salvo `ALLOW_INSECURE_DEV=true`).
+  3. **CORS Estricto:** Lista blanca configurable vía `ALLOWED_ORIGINS`, `Vary: Origin` y rechazo 403 en OPTIONS ajenos.
+  4. **Análisis No Persistente (Read-Only):** `POST /api/analyzeRepo` devuelve `AnalyzePlan` sin tocar `history.json` ni mutar el estado de proyectos en ejecución.
+  5. **Parseo YAML Estructurado de Compose:** Soporte para `docker-compose.yml`, `docker-compose.yaml`, `compose.yml` y `compose.yaml` mediante `gopkg.in/yaml.v3`. Extracción exacta del puerto de contenedor (`target`) y descarte total de falsos positivos por comentarios.
+  6. **Clonado Seguro con Timeout:** `context.WithTimeout(2*time.Minute)` y rechazo inmediato si la rama explícita solicitada no existe (sin fallback silencioso a master o default).
+  7. **Identificadores Deterministas y Sanitización:** IDs calculados como `owner-repo`, sanitización RFC 1123, prefijo automático `app-` para nombres reservados o cortos, y prohibición explícita de nombres que terminen en `-api` o `-docs`.
+  8. **Protección contra Corrupción en Store:** Si `history.json` contiene JSON inválido, se crea respaldo `history.json.corrupt.<timestamp>` y se aborta con error en lugar de sobreescribir con array vacío.
+  9. **Stubs 501 Not Implemented:** `/api/deploy`, `/api/projects/{id}` (DELETE), `/api/projects/{id}/logs` y `redeploy` responden 501 con modelo de error uniforme `{"status":"error","error":"...","code":"NOT_IMPLEMENTED"}`.
+  10. **Aislamiento de Builds:** Manifiesto `manifests/builds-namespace.yaml` para aislar compilaciones de Kaniko con `ResourceQuota`, `LimitRange` y `NetworkPolicy`.
+  11. **Frontend Moderno:** Modal React nativo para configuración de clave API y captura de errores 401 sin cuadros `prompt()` de navegador.
+  12. **Pruebas Unitarias al 100%:** Suites completas pasando en `api`, `core`, `services` y `storage`.
 
 ### 🔹 Hito 4.1: DatabaseManager (Supabase Modelo A)
 * **Objetivo:** Conexión interna a `postgres.supabase.svc.cluster.local:5432` con usuario `postgres`.
@@ -62,8 +63,9 @@ Este documento define la trayectoria técnica del proyecto, contrastando el esta
   1. Matriz de 4 casos de idempotencia implementada (rol existe/no existe, secret existe/no existe).
   2. Ejecución de `GRANT "<proyecto>_user" TO postgres` previa a `CREATE DATABASE` para asegurar ownership sin requerir superusuario.
   3. Aislamiento estricto: `REVOKE ALL ON DATABASE "<proyecto>_db" FROM PUBLIC` y `REVOKE CONNECT ON DATABASE postgres FROM "<proyecto>_user"`.
-  4. Límite de conexiones: `CONNECTION LIMIT 20` por usuario de proyecto.
-  5. Métricas de base de datos registradas en `postgres-exporter` y visibles en Grafana.
+  4. Límite de conexiones: `CONNECTION LIMIT 20` por usuario de proyecto en `CREATE` y `ALTER ROLE`.
+  5. Purga limpia con `delete_db=true` (`pg_terminate_backend`, `DROP DATABASE`, `REVOKE`, `DROP USER`).
+  6. Métricas de base de datos registradas en `postgres-exporter` y visibles en Grafana.
 
 ### 🔹 Hito 4.2: SecretManager e Idempotencia
 * **Objetivo:** Creación segura de objetos `Secret` en Kubernetes desde memoria.
@@ -77,8 +79,9 @@ Este documento define la trayectoria técnica del proyecto, contrastando el esta
 * **Criterios de Aceptación:**
   1. Nombres sanitizados bajo RFC 1123 (`[a-z0-9-]`, 3-35 caracteres) y filtrados contra nombres reservados (`kube-*`, etc.).
   2. Subdominios de nivel único compatibles con Wildcard TLS: `{{ .projectName }}.sammcore.local` (Web) y `{{ .projectName }}-api.sammcore.local` (API).
-  3. NetworkPolicy con tráfico intra-namespace (`podSelector: {}`), DNS (UDP/TCP 53) y exclusión de CIDRs privados RFC 1918.
-  4. Inclusión obligatoria de `LimitRange`, `requests` y `limits` en todos los contenedores e initContainers.
+  3. Inclusión de `imagePullSecrets: [{name: sammcore-registry-secret}]` en los pods para descarga de imágenes de GHCR.
+  4. NetworkPolicy con tráfico intra-namespace (`podSelector: {}`), DNS (UDP/TCP 53) y exclusión de CIDRs privados RFC 1918.
+  5. Inclusión obligatoria de `LimitRange`, `requests` y `limits` en todos los contenedores e initContainers.
 
 ### 🔹 Hito 4.4: DeployManager y Endpoint `POST /api/deploy`
 * **Objetivo:** Aplicar los manifiestos al clúster K3s de forma asíncrona (`202 Accepted`) y monitorear el rollout.
@@ -102,9 +105,9 @@ Este documento define la trayectoria técnica del proyecto, contrastando el esta
 ### Tareas
 - [x] Dockerfile multi-stage para `backend` (Go 1.23 sobre Alpine).
 - [x] Dockerfile multi-stage para `frontend` (React/Vite servido por NGINX).
-- [x] Manifiestos declarativos en `manifests/`: `namespace.yaml`, `rbac.yaml`, `pvc.yaml`, `backend.yaml`, `frontend.yaml`, `ingress.yaml`.
+- [x] Manifiestos declarativos en `manifests/`: `namespace.yaml`, `builds-namespace.yaml`, `rbac.yaml`, `pvc.yaml`, `backend.yaml`, `frontend.yaml`, `ingress.yaml`.
 - [x] Enrutamiento activo en `https://deployer.sammcore.local` (vía Ingress `/` y `/api`).
-- [ ] Workflow `.github/workflows/deploy.yml` pendiente de publicación en GitHub (requiere otorgar scope `workflow` a GitHub CLI o push con Personal Access Token).
+- [ ] Workflow `.github/workflows/deploy.yml` pendiente de publicación en GitHub.
 
 ---
 

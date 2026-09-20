@@ -1,6 +1,7 @@
 package services
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log"
@@ -9,10 +10,12 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	git "github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/transport/http"
+	"gopkg.in/yaml.v3"
 )
 
 type ProjectType int
@@ -74,17 +77,15 @@ func (r *RepoManager) Clone() error {
 	}
 	target := r.Workdir
 
-	branch := r.Branch
-	if branch == "" {
-		branch = "main"
-	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
 
+	branch := r.Branch
 	opts := &git.CloneOptions{
-		URL:           r.RepoURL,
-		Progress:      progressWriter(r.Verbose),
-		SingleBranch:  true,
-		Depth:         1,
-		ReferenceName: plumbing.NewBranchReferenceName(branch),
+		URL:          r.RepoURL,
+		Progress:     progressWriter(r.Verbose),
+		SingleBranch: true,
+		Depth:        1,
 	}
 
 	// Asignación de autenticación ANTES de clonar
@@ -96,43 +97,133 @@ func (r *RepoManager) Clone() error {
 		log.Printf("[Clone] Usando credenciales para clonado de %s", r.RepoURL)
 	}
 
-	// 1. Intentar con la rama solicitada
-	_, err := git.PlainClone(target, false, opts)
-	if err == nil {
+	// 1. Si el usuario solicitó explícitamente una rama específica distinta de "main" y vacía
+	if branch != "" && branch != "main" {
+		opts.ReferenceName = plumbing.NewBranchReferenceName(branch)
+		_, err := git.PlainCloneContext(ctx, target, false, opts)
+		if err != nil {
+			return fmt.Errorf("fallo al clonar repositorio en la rama solicitada '%s': %w", branch, err)
+		}
 		r.ResolvedBranch = branch
 		return nil
 	}
 
-	// 2. Fallback a master si se solicitó main
-	if branch == "main" {
-		opts.ReferenceName = plumbing.NewBranchReferenceName("master")
-		_, errMaster := git.PlainClone(target, false, opts)
-		if errMaster == nil {
-			r.ResolvedBranch = "master"
+	// 2. Si se solicitó "main" o no se especificó rama: intentar primero "main"
+	opts.ReferenceName = plumbing.NewBranchReferenceName("main")
+	_, err := git.PlainCloneContext(ctx, target, false, opts)
+	if err == nil {
+		r.ResolvedBranch = "main"
+		return nil
+	}
+
+	// 3. Fallback a master
+	opts.ReferenceName = plumbing.NewBranchReferenceName("master")
+	_, errMaster := git.PlainCloneContext(ctx, target, false, opts)
+	if errMaster == nil {
+		r.ResolvedBranch = "master"
+		return nil
+	}
+
+	// 4. Si no se especificó rama en absoluto (branch == ""), fallback a la rama por defecto remota
+	if branch == "" {
+		opts.SingleBranch = false
+		opts.ReferenceName = ""
+		repo, errDefault := git.PlainCloneContext(ctx, target, false, opts)
+		if errDefault == nil {
+			ref, refErr := repo.Head()
+			if refErr == nil {
+				r.ResolvedBranch = ref.Name().Short()
+			} else {
+				r.ResolvedBranch = "default"
+			}
 			return nil
 		}
 	}
 
-	// 3. Fallback a la rama por defecto del repositorio remoto
-	opts.SingleBranch = false
-	opts.ReferenceName = ""
-	repo, errDefault := git.PlainClone(target, false, opts)
-	if errDefault == nil {
-		ref, refErr := repo.Head()
-		if refErr == nil {
-			r.ResolvedBranch = ref.Name().Short()
-		} else {
-			r.ResolvedBranch = "default"
-		}
-		return nil
-	}
-
-	return fmt.Errorf("fallo al clonar repositorio (rama=%s): %v", branch, err)
+	return fmt.Errorf("fallo al clonar repositorio (rama solicitada='%s'): no se encontró 'main' ni 'master': %w", branch, err)
 }
 
-var portRegex = regexp.MustCompile(`(?m)^\s*-\s*["']?(\d+):(\d+)["']?`)
+type composeServiceDefinition struct {
+	Image       string        `yaml:"image"`
+	Ports       []interface{} `yaml:"ports"`
+	Expose      []interface{} `yaml:"expose"`
+	Environment interface{}   `yaml:"environment"`
+}
+
+type composeFileStructure struct {
+	Services map[string]composeServiceDefinition `yaml:"services"`
+}
+
+func parseContainerPort(raw interface{}) (int, bool) {
+	switch v := raw.(type) {
+	case int:
+		if v > 0 && v <= 65535 {
+			return v, true
+		}
+	case string:
+		// Remover posibles protocolos tipo "/tcp" o "/udp"
+		clean := strings.Split(strings.TrimSpace(v), "/")[0]
+		// Separar por ":" para casos "host:container", "ip:host:container" o solo "container"
+		tokens := strings.Split(clean, ":")
+		if len(tokens) > 0 {
+			targetStr := tokens[len(tokens)-1]
+			if p, err := strconv.Atoi(targetStr); err == nil && p > 0 && p <= 65535 {
+				return p, true
+			}
+		}
+	case map[string]interface{}:
+		// Formato expandido Compose v2+: target: 80, published: 8080
+		if targetVal, ok := v["target"]; ok {
+			return parseContainerPort(targetVal)
+		}
+	}
+	return 0, false
+}
+
+func isDBEnvKey(key string) bool {
+	upper := strings.ToUpper(key)
+	return strings.Contains(upper, "POSTGRES") ||
+		strings.Contains(upper, "DATABASE_URL") ||
+		strings.Contains(upper, "DB_HOST") ||
+		strings.Contains(upper, "DB_NAME") ||
+		strings.Contains(upper, "DB_USER") ||
+		strings.Contains(upper, "DB_PASSWORD") ||
+		strings.Contains(upper, "MYSQL_")
+}
+
+func isDBService(svc composeServiceDefinition) bool {
+	// 1. Imagen del contenedor (sin falsos positivos por comentarios)
+	img := strings.ToLower(svc.Image)
+	if strings.Contains(img, "postgres") ||
+		strings.Contains(img, "mysql") ||
+		strings.Contains(img, "mariadb") ||
+		strings.Contains(img, "cockroach") ||
+		strings.Contains(img, "timescale") {
+		return true
+	}
+
+	// 2. Variables de entorno estructuradas
+	switch env := svc.Environment.(type) {
+	case []interface{}:
+		for _, item := range env {
+			if s, ok := item.(string); ok {
+				parts := strings.SplitN(s, "=", 2)
+				if isDBEnvKey(parts[0]) {
+					return true
+				}
+			}
+		}
+	case map[string]interface{}:
+		for k := range env {
+			if isDBEnvKey(k) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 var exposeRegex = regexp.MustCompile(`(?i)^\s*EXPOSE\s+(\d+)`)
-var dbImageRegex = regexp.MustCompile(`(?i)(postgres|mysql|mariadb|cockroach|timescale)`)
 
 func (r *RepoManager) DetectProjectType() (DetectionResult, error) {
 	if r.Workdir == "" {
@@ -156,8 +247,11 @@ func (r *RepoManager) DetectProjectType() (DetectionResult, error) {
 		}
 		name := strings.ToLower(entry.Name())
 		switch name {
-		case "docker-compose.yml", "docker-compose.yaml":
-			hasComposeFile = entry.Name()
+		case "docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml":
+			// Preferir compose si se encuentra primero
+			if hasComposeFile == "" {
+				hasComposeFile = entry.Name()
+			}
 		case "dockerfile":
 			hasDockerfile = entry.Name()
 		case "index.html":
@@ -171,28 +265,39 @@ func (r *RepoManager) DetectProjectType() (DetectionResult, error) {
 		ResolvedBranch: r.ResolvedBranch,
 	}
 
-	// 1. Detección Compose
+	// 1. Detección Compose estructurada con YAML parser
 	if hasComposeFile != "" {
 		res.Type = ProjectCompose
 		res.Evidence = append(res.Evidence, hasComposeFile)
 
 		content, err := os.ReadFile(filepath.Join(r.Workdir, hasComposeFile))
 		if err == nil {
-			text := string(content)
-			// Verificar si declara un servicio de base de datos relacional
-			if dbImageRegex.MatchString(text) || strings.Contains(text, "5432") || strings.Contains(text, "3306") || strings.Contains(text, "DB_HOST") {
-				res.RequiresDatabase = true
-			}
-			// Extraer puertos expuestos
-			matches := portRegex.FindAllStringSubmatch(text, -1)
-			seenPorts := make(map[int]bool)
-			for _, m := range matches {
-				if len(m) > 1 {
-					if p, err := strconv.Atoi(m[1]); err == nil && !seenPorts[p] {
-						seenPorts[p] = true
-						res.DetectedPorts = append(res.DetectedPorts, p)
+			var composeData composeFileStructure
+			if err := yaml.Unmarshal(content, &composeData); err == nil {
+				seenPorts := make(map[int]bool)
+
+				for _, svc := range composeData.Services {
+					if isDBService(svc) {
+						res.RequiresDatabase = true
+					}
+
+					// Extraer puertos de contenedor reales (target)
+					for _, pRaw := range svc.Ports {
+						if p, ok := parseContainerPort(pRaw); ok && !seenPorts[p] {
+							seenPorts[p] = true
+							res.DetectedPorts = append(res.DetectedPorts, p)
+						}
+					}
+					// Extraer puertos de expose
+					for _, expRaw := range svc.Expose {
+						if p, ok := parseContainerPort(expRaw); ok && !seenPorts[p] {
+							seenPorts[p] = true
+							res.DetectedPorts = append(res.DetectedPorts, p)
+						}
 					}
 				}
+			} else {
+				res.Evidence = append(res.Evidence, "advertencia: archivo compose no es YAML válido")
 			}
 		}
 		return res, nil
@@ -205,11 +310,20 @@ func (r *RepoManager) DetectProjectType() (DetectionResult, error) {
 
 		content, err := os.ReadFile(filepath.Join(r.Workdir, hasDockerfile))
 		if err == nil {
-			matches := exposeRegex.FindAllStringSubmatch(string(content), -1)
-			for _, m := range matches {
-				if len(m) > 1 {
-					if p, err := strconv.Atoi(m[1]); err == nil {
-						res.DetectedPorts = append(res.DetectedPorts, p)
+			lines := strings.Split(string(content), "\n")
+			seenPorts := make(map[int]bool)
+			for _, line := range lines {
+				trimmed := strings.TrimSpace(line)
+				if strings.HasPrefix(trimmed, "#") {
+					continue // Ignorar comentarios
+				}
+				matches := exposeRegex.FindAllStringSubmatch(trimmed, -1)
+				for _, m := range matches {
+					if len(m) > 1 {
+						if p, err := strconv.Atoi(m[1]); err == nil && !seenPorts[p] {
+							seenPorts[p] = true
+							res.DetectedPorts = append(res.DetectedPorts, p)
+						}
 					}
 				}
 			}
@@ -219,7 +333,6 @@ func (r *RepoManager) DetectProjectType() (DetectionResult, error) {
 
 	// 3. Detección Sitio Estático
 	if hasIndexHTML != "" {
-		// Si tiene package.json, verificar si es un proyecto de build (Vite/React) o estático puro
 		if hasPackageJSON != "" {
 			pkgContent, _ := os.ReadFile(filepath.Join(r.Workdir, hasPackageJSON))
 			if strings.Contains(string(pkgContent), "vite") || strings.Contains(string(pkgContent), "react-scripts") {

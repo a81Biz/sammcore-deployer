@@ -6,10 +6,10 @@ Este documento define la arquitectura de plantillas que `sammcore-deployer` util
 
 ## 1. 🎯 Reglas de Traducción Compose $\rightarrow$ Kubernetes
 
-Cuando un repositorio contiene `docker-compose.yml`, el módulo `TemplateManager` aplica las siguientes reglas de conversión deterministas:
+Cuando un repositorio contiene `docker-compose.yml` o `compose.yaml`, el módulo `TemplateManager` aplica las siguientes reglas de conversión deterministas:
 
 1. **Extracción del Servicio de Base de Datos:**
-   - Si un servicio utiliza una imagen que contiene `postgres`, `mysql`, `mariadb` o expone puertos `5432`/`3306`, **dicho servicio se descarta del despliegue en K8s**.
+   - Si un servicio utiliza una imagen que contiene `postgres`, `mysql`, `mariadb` o variables `DATABASE_URL`/`DB_HOST`, **dicho servicio se descarta del despliegue en K8s**.
    - Se activa la bandera `requires_database = true`.
    - Se inyectan las credenciales del clúster central de Supabase (Modelo A) mediante variables de entorno referenciadas al Secret `{{ .projectName }}-db-secrets`.
 2. **Heurística Frontend (Web) vs Backend (API):**
@@ -161,6 +161,8 @@ spec:
         app: {{ .projectName }}-web
     spec:
       automountServiceAccountToken: false
+      imagePullSecrets:
+        - name: sammcore-registry-secret
       containers:
         - name: web
           image: {{ .webImage }}
@@ -201,7 +203,7 @@ spec:
       targetPort: {{ .webPort }}
 ```
 
-#### API Deployment con InitContainer de BD & Service:
+#### API Deployment con InitContainer Condicional de BD & Service:
 ```yaml
 apiVersion: apps/v1
 kind: Deployment
@@ -219,6 +221,9 @@ spec:
         app: {{ .projectName }}-api
     spec:
       automountServiceAccountToken: false
+      imagePullSecrets:
+        - name: sammcore-registry-secret
+      {{- if .requiresDatabase }}
       initContainers:
         - name: wait-for-db
           image: busybox:1.36
@@ -230,6 +235,7 @@ spec:
             limits:
               cpu: 50m
               memory: 32Mi
+      {{- end }}
       containers:
         - name: api
           image: {{ .apiImage }}
@@ -237,9 +243,11 @@ spec:
           ports:
             - name: http
               containerPort: {{ .apiPort }}
+          {{- if .requiresDatabase }}
           envFrom:
             - secretRef:
                 name: {{ .projectName }}-db-secrets
+          {{- end }}
           readinessProbe:
             tcpSocket:
               port: {{ .apiPort }}
@@ -327,6 +335,8 @@ spec:
         app: {{ .projectName }}-app
     spec:
       automountServiceAccountToken: false
+      imagePullSecrets:
+        - name: sammcore-registry-secret
       {{- if .requiresDatabase }}
       initContainers:
         - name: wait-for-db
@@ -419,6 +429,8 @@ spec:
         app: {{ .projectName }}-static
     spec:
       automountServiceAccountToken: false
+      imagePullSecrets:
+        - name: sammcore-registry-secret
       containers:
         - name: nginx
           image: {{ .staticImage }}
@@ -472,7 +484,7 @@ spec:
 
 ## 4. 🔨 Plantilla de Build In-Cluster con Kaniko (Namespace `deployer-builds`)
 
-Los builds se ejecutan en un namespace aislado de construcción para no consumir la cuota de la app:
+Los builds se ejecutan en el namespace aislado de construcción `deployer-builds` (cuya infraestructura base está declarada en [`manifests/builds-namespace.yaml`](../manifests/builds-namespace.yaml)):
 
 ```yaml
 apiVersion: batch/v1

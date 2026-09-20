@@ -1,4 +1,4 @@
-const API_BASE = import.meta.env.VITE_API_BASE || "/api";
+const API_BASE = (import.meta.env.VITE_API_BASE || "/api").replace(/\/$/, "");
 const STORAGE_KEY = "sammcore_deployer_api_key";
 
 export function getApiKey(): string {
@@ -6,11 +6,17 @@ export function getApiKey(): string {
 }
 
 export function setApiKey(key: string): void {
-  localStorage.setItem(STORAGE_KEY, key.trim());
+  const trimmed = key.trim();
+  if (trimmed) {
+    localStorage.setItem(STORAGE_KEY, trimmed);
+  } else {
+    localStorage.removeItem(STORAGE_KEY);
+  }
 }
 
 export async function authFetch(endpoint: string, options: RequestInit = {}): Promise<Response> {
-  const url = endpoint.startsWith("http") ? endpoint : `${API_BASE}${endpoint}`;
+  const cleanEndpoint = endpoint.startsWith("/") ? endpoint : `/${endpoint}`;
+  const url = cleanEndpoint.startsWith("http") ? cleanEndpoint : `${API_BASE}${cleanEndpoint}`;
   const key = getApiKey();
 
   const headers = new Headers(options.headers || {});
@@ -24,11 +30,11 @@ export async function authFetch(endpoint: string, options: RequestInit = {}): Pr
   const response = await fetch(url, { ...options, headers });
 
   if (response.status === 401) {
-    const userKey = prompt("Autenticación requerida. Ingrese la DEPLOYER_API_KEY:");
-    if (userKey) {
-      setApiKey(userKey);
-      headers.set("Authorization", `Bearer ${userKey.trim()}`);
-      return fetch(url, { ...options, headers });
+    // Disparar evento para que la UI abra el modal de configuración de clave
+    if (typeof window !== "undefined") {
+      window.dispatchEvent(new CustomEvent("deployer:auth-required", {
+        detail: { message: "Se requiere autenticación. Por favor ingrese su DEPLOYER_API_KEY." }
+      }));
     }
   }
 
@@ -52,22 +58,24 @@ export async function analyzeRepo(repo: string, branch: string) {
 export async function getProjects() {
   const res = await authFetch("/projects");
   if (!res.ok) {
-    throw new Error(`Error al cargar proyectos: ${res.statusText}`);
+    const err = await res.json().catch(() => ({ error: "Error al cargar proyectos" }));
+    throw new Error(err.error || `Error ${res.status}`);
   }
   return res.json();
 }
 
 export async function getProjectLogs(id: string) {
   const res = await authFetch(`/projects/${id}/logs`);
+  const data = await res.json().catch(() => ({ error: "Error al obtener logs" }));
   if (!res.ok) {
-    throw new Error(`Error al obtener logs: ${res.statusText}`);
+    throw new Error(data.error || `Error ${res.status}`);
   }
-  return res.json();
+  return data;
 }
 
 export async function redeployProject(id: string) {
   const res = await authFetch(`/projects/${id}/redeploy`, { method: "POST" });
-  const data = await res.json();
+  const data = await res.json().catch(() => ({ error: "Error al re-desplegar" }));
   if (!res.ok) {
     throw new Error(data.error || `Error ${res.status}`);
   }
@@ -76,7 +84,7 @@ export async function redeployProject(id: string) {
 
 export async function deleteProject(id: string, deleteDB: boolean = false) {
   const res = await authFetch(`/projects/${id}?delete_db=${deleteDB}`, { method: "DELETE" });
-  const data = await res.json();
+  const data = await res.json().catch(() => ({ error: "Error al eliminar proyecto" }));
   if (!res.ok) {
     throw new Error(data.error || `Error ${res.status}`);
   }

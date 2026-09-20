@@ -14,7 +14,7 @@ Este documento formaliza las políticas de seguridad, gobernanza de recursos, co
   - Endpoints Protegidos: `POST /api/analyzeRepo`, `POST /api/deploy`, `DELETE /api/projects/:id`, `POST /api/projects/:id/redeploy`, `GET /api/projects/:id/logs`.
   - Endpoints Públicos de Diagnóstico: `GET /api/health`, `GET /metrics`.
 * **Manejo en la UI (React/Vite):**  
-  La UI solicita la clave al desarrollador en su primera visita mediante una modal o botón en el Navbar y la almacena localmente en `localStorage` del navegador (`sammcore_deployer_api_key`), inyectándola dinámicamente en los headers de cada llamada a `/api/*`.
+  La UI solicita la clave al desarrollador en su primera visita mediante un componente modal React accesible desde el Navbar y la almacena localmente en `localStorage` del navegador (`sammcore_deployer_api_key`), inyectándola dinámicamente en los headers de cada llamada a `/api/*`. Si el servidor responde 401, el evento `deployer:auth-required` abre automáticamente la ventana modal.
 
 ### 🔹 1.2. Política de CORS (Cross-Origin Resource Sharing)
 * Orígenes explícitamente autorizados mediante la variable `ALLOWED_ORIGINS` (con cabecera `Vary: Origin`):
@@ -38,6 +38,8 @@ El identificador de proyecto (`projectName`) rige la denominación de los recurs
   ```regex
   ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
   ```
+* **Prohibición de Sufijos Colisionantes:**
+  Se prohíben explícitamente nombres de proyecto que terminen en `-api` o `-docs`, dado que los subdominios de backend se estructuran automáticamente como `<proyecto>-api.sammcore.local`.
 * **Lista Negra de Nombres Reservados:**
   Se prohíbe el registro de proyectos con nombres que coincidan con:
   `deployer`, `supabase`, `monitoring`, `ingress-nginx`, `default`, `api`, `docs`, `admin`, `grafana`, `prometheus`, `traefik`, `portainer`, o cualquier prefijo `kube-*`.
@@ -71,8 +73,9 @@ El identificador de proyecto (`projectName`) rige la denominación de los recurs
 Para instalar el deployer desde cero en un clúster K3s nuevo, el administrador ejecuta:
 
 ```bash
-# 1. Crear namespace
+# 1. Crear namespaces del sistema y de compilación
 kubectl apply -f manifests/namespace.yaml
+kubectl apply -f manifests/builds-namespace.yaml
 
 # 2. Extraer la contraseña maestra de PostgreSQL en Supabase
 SUPABASE_PASS=$(kubectl get secret supabase-postgres-secret -n supabase -o jsonpath='{.data.POSTGRES_PASSWORD}' | base64 -d)
@@ -91,16 +94,22 @@ kubectl create secret generic deployer-secrets -n deployer \
   --from-literal=SUPABASE_PORT="5432" \
   --from-literal=SUPABASE_POSTGRES_PASSWORD="$SUPABASE_PASS"
 
-# 5. Aplicar RBAC y almacenamiento persistente (PVC)
+# 5. Crear Secret de autenticación para Kaniko en deployer-builds (GHCR / Registro local)
+kubectl create secret docker-registry kaniko-registry-secret -n deployer-builds \
+  --docker-server=ghcr.io \
+  --docker-username=a81biz \
+  --docker-password="$GITHUB_TOKEN"
+
+# 6. Aplicar RBAC y almacenamiento persistente (PVC)
 kubectl apply -f manifests/rbac.yaml
 kubectl apply -f manifests/pvc.yaml
 
-# 6. Desplegar cargas de trabajo e Ingress
+# 7. Desplegar cargas de trabajo e Ingress
 kubectl apply -f manifests/backend.yaml
 kubectl apply -f manifests/frontend.yaml
 kubectl apply -f manifests/ingress.yaml
 
-# 7. Verificación Post-Bootstrap
+# 8. Verificación Post-Bootstrap
 echo "Verificando pods..."
 kubectl get pods -n deployer -w
 ```

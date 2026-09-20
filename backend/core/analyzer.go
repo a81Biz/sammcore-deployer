@@ -7,11 +7,9 @@ import (
 	"os"
 	"regexp"
 	"strings"
-	"time"
 
 	"sammcore-deployer/secrets"
 	"sammcore-deployer/services"
-	"sammcore-deployer/storage"
 )
 
 var repoRegex = regexp.MustCompile(`^https://github\.com/[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+(\.git)?$`)
@@ -49,10 +47,13 @@ type AnalyzeRequest struct {
 type AnalyzeResponse struct {
 	Status           string   `json:"status"`
 	Error            string   `json:"error,omitempty"`
+	Code             string   `json:"code,omitempty"`
 	ID               string   `json:"id,omitempty"`
 	Name             string   `json:"name,omitempty"`
 	Type             string   `json:"type,omitempty"`
 	Branch           string   `json:"branch,omitempty"`
+	Domain           string   `json:"domain,omitempty"`
+	APIDomain        string   `json:"api_domain,omitempty"`
 	RequiresDatabase bool     `json:"requires_database"`
 	DetectedPorts    []int    `json:"detected_ports,omitempty"`
 	Evidence         []string `json:"evidence,omitempty"`
@@ -64,29 +65,70 @@ func generateID() string {
 	return hex.EncodeToString(b)
 }
 
-func sanitizeProjectName(repoURL string) string {
-	parts := strings.Split(strings.TrimSuffix(repoURL, ".git"), "/")
-	base := strings.ToLower(parts[len(parts)-1])
+func deriveDeterministicID(repoURL string) string {
+	cleanURL := strings.ToLower(strings.TrimSpace(repoURL))
+	cleanURL = strings.TrimSuffix(cleanURL, ".git")
+	cleanURL = strings.TrimPrefix(cleanURL, "https://github.com/")
+
+	parts := strings.Split(cleanURL, "/")
+	if len(parts) >= 2 {
+		owner := nonAlphanumericDash.ReplaceAllString(parts[0], "-")
+		repo := nonAlphanumericDash.ReplaceAllString(parts[1], "-")
+		id := fmt.Sprintf("%s-%s", strings.Trim(owner, "-"), strings.Trim(repo, "-"))
+		if len(id) > 50 {
+			id = id[:50]
+		}
+		return strings.Trim(id, "-")
+	}
+	return generateID()
+}
+
+func sanitizeProjectName(repoURL string) (string, error) {
+	cleanURL := strings.ToLower(strings.TrimSpace(repoURL))
+	cleanURL = strings.TrimSuffix(cleanURL, ".git")
+	parts := strings.Split(cleanURL, "/")
+	base := parts[len(parts)-1]
+
 	clean := nonAlphanumericDash.ReplaceAllString(base, "-")
 	clean = strings.Trim(clean, "-")
 
-	// Cumplir con longitud mínima de 3 caracteres y máxima de 35
 	if len(clean) < 3 || isReservedName(clean) {
 		clean = "app-" + clean
 	}
+	clean = strings.Trim(clean, "-")
+	if len(clean) < 3 {
+		clean = "app-" + generateID()
+	}
+
 	if len(clean) > 35 {
 		clean = clean[:35]
 		clean = strings.TrimRight(clean, "-")
 	}
-	return clean
+
+	if strings.HasSuffix(clean, "-api") || strings.HasSuffix(clean, "-docs") {
+		return "", fmt.Errorf("el nombre del proyecto '%s' no puede terminar en '-api' ni '-docs' para evitar colisiones de subdominios", clean)
+	}
+
+	return clean, nil
 }
 
 func Analyze(req AnalyzeRequest) AnalyzeResponse {
-	repo := strings.TrimSpace(req.Repo)
-	if !repoRegex.MatchString(repo) {
+	rawRepo := strings.TrimSpace(req.Repo)
+	if !repoRegex.MatchString(rawRepo) {
 		return AnalyzeResponse{
 			Status: "error",
 			Error:  "URL de repositorio inválida. Debe ser una URL HTTPS de GitHub (ej. https://github.com/org/repo)",
+			Code:   "INVALID_REPO_URL",
+		}
+	}
+
+	repoNormalized := strings.ToLower(rawRepo)
+	projectName, err := sanitizeProjectName(repoNormalized)
+	if err != nil {
+		return AnalyzeResponse{
+			Status: "error",
+			Error:  err.Error(),
+			Code:   "INVALID_PROJECT_NAME",
 		}
 	}
 
@@ -95,7 +137,7 @@ func Analyze(req AnalyzeRequest) AnalyzeResponse {
 		branch = "main"
 	}
 
-	rm := services.NewRepoManager(repo, branch, "", false)
+	rm := services.NewRepoManager(rawRepo, branch, "", false)
 
 	// Garantizar limpieza de disco SIEMPRE mediante defer
 	defer func() {
@@ -117,59 +159,47 @@ func Analyze(req AnalyzeRequest) AnalyzeResponse {
 	}
 
 	if err := rm.Clone(); err != nil {
-		return AnalyzeResponse{Status: "error", Error: fmt.Sprintf("fallo al clonar: %v", err)}
+		return AnalyzeResponse{
+			Status: "error",
+			Error:  fmt.Sprintf("fallo al clonar: %v", err),
+			Code:   "CLONE_FAILED",
+		}
 	}
 
 	result, err := rm.DetectProjectType()
 	if err != nil {
-		return AnalyzeResponse{Status: "error", Error: err.Error()}
+		return AnalyzeResponse{
+			Status: "error",
+			Error:  err.Error(),
+			Code:   "DETECTION_FAILED",
+		}
 	}
 
-	projectName := sanitizeProjectName(repo)
 	resolvedBranch := rm.ResolvedBranch
 	if resolvedBranch == "" {
 		resolvedBranch = branch
 	}
 
-	// Unicidad: verificar si el proyecto ya existía para actualizarlo o crearlo
-	existingProjects, _ := storage.LoadProjects()
-	var projectID string
-	for _, ep := range existingProjects {
-		if ep.Repo == repo {
-			projectID = ep.ID
-			break
-		}
-	}
-	if projectID == "" {
-		projectID = generateID()
-	}
-
-	p := storage.Project{
-		ID:               projectID,
-		Name:             projectName,
-		Repo:             repo,
-		Branch:           resolvedBranch,
-		Type:             result.Type.String(),
-		Namespace:        projectName,
-		Domain:           fmt.Sprintf("%s.sammcore.local", projectName),
-		RequiresDatabase: result.RequiresDatabase,
-		Status:           storage.StatusAnalyzed,
-		CreatedAt:        time.Now(),
-		UpdatedAt:        time.Now(),
-	}
+	projectID := deriveDeterministicID(repoNormalized)
+	domain := fmt.Sprintf("%s.sammcore.local", projectName)
+	var apiDomain string
 
 	if result.Type == services.ProjectCompose {
-		p.APIDomain = fmt.Sprintf("api.%s.sammcore.local", projectName)
+		// Subdominio de nivel único compatible con el wildcard TLS *.sammcore.local
+		apiDomain = fmt.Sprintf("%s-api.sammcore.local", projectName)
 	}
 
-	_ = storage.AddOrUpdateProject(p)
-
+	// NOTA ARQUITECTÓNICA: Analyze es estrictamente de sólo lectura.
+	// NO persiste en history.json ni muta el estado de proyectos en ejecución.
+	// La persistencia y el despliegue corresponden exclusivamente a POST /api/deploy.
 	return AnalyzeResponse{
 		Status:           "ok",
 		ID:               projectID,
 		Name:             projectName,
 		Type:             result.Type.String(),
 		Branch:           resolvedBranch,
+		Domain:           domain,
+		APIDomain:        apiDomain,
 		RequiresDatabase: result.RequiresDatabase,
 		DetectedPorts:    result.DetectedPorts,
 		Evidence:         result.Evidence,
