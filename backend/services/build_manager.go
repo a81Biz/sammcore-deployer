@@ -262,6 +262,7 @@ func (bm *BuildManager) EnsureImages(ctx context.Context, p storage.Project, ser
 									"--insecure",
 									"--skip-tls-verify",
 									"--cache=true",
+									"--compressed-caching=false",
 									"--snapshot-mode=redo",
 								},
 								VolumeMounts: []corev1.VolumeMount{
@@ -273,11 +274,11 @@ func (bm *BuildManager) EnsureImages(ctx context.Context, p storage.Project, ser
 								Resources: corev1.ResourceRequirements{
 									Requests: corev1.ResourceList{
 										corev1.ResourceCPU:    resource.MustParse("200m"),
-										corev1.ResourceMemory: resource.MustParse("512Mi"),
+										corev1.ResourceMemory: resource.MustParse("1Gi"),
 									},
 									Limits: corev1.ResourceList{
-										corev1.ResourceCPU:    resource.MustParse("2500m"),
-										corev1.ResourceMemory: resource.MustParse("3500Mi"),
+										corev1.ResourceCPU:    resource.MustParse("3500m"),
+										corev1.ResourceMemory: resource.MustParse("7500Mi"),
 									},
 								},
 							},
