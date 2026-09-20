@@ -55,7 +55,37 @@ export async function analyzeRepo(repo: string, branch: string) {
   return res.json();
 }
 
+export interface DeployPayload {
+  name: string;
+  repo: string;
+  branch?: string;
+  type?: string;
+  requires_database?: boolean;
+  web_image?: string;
+  api_image?: string;
+  app_image?: string;
+  static_image?: string;
+  web_port?: number;
+  api_port?: number;
+  app_port?: number;
+  build_args?: Record<string, string>;
+}
+
+export async function deployProject(payload: DeployPayload) {
+  const res = await authFetch("/deploy", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+
+  const data = await res.json().catch(() => ({ error: "Error de red al procesar el despliegue" }));
+  if (!res.ok && res.status !== 202) {
+    throw new Error(data.error || `Error ${res.status}`);
+  }
+  return data;
+}
+
 export async function getProjects() {
+
   const res = await authFetch("/projects");
   if (!res.ok) {
     const err = await res.json().catch(() => ({ error: "Error al cargar proyectos" }));
