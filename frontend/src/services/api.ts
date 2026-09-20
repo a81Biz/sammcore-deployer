@@ -41,6 +41,15 @@ export async function authFetch(endpoint: string, options: RequestInit = {}): Pr
   return response;
 }
 
+// ServiceSpec refleja la estructura del backend Go
+export interface ServiceSpec {
+  name: string;
+  role: string; // "web" | "api" | "worker" | "app"
+  port?: number;
+  build_context?: string;
+  dockerfile?: string;
+}
+
 export async function analyzeRepo(repo: string, branch: string) {
   const res = await authFetch("/analyzeRepo", {
     method: "POST",
@@ -61,13 +70,7 @@ export interface DeployPayload {
   branch?: string;
   type?: string;
   requires_database?: boolean;
-  web_image?: string;
-  api_image?: string;
-  app_image?: string;
-  static_image?: string;
-  web_port?: number;
-  api_port?: number;
-  app_port?: number;
+  services?: ServiceSpec[];
   build_args?: Record<string, string>;
 }
 
@@ -129,4 +132,3 @@ export async function getProjectMetrics(id: string) {
   }
   return data;
 }
-

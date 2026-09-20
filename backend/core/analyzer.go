@@ -53,18 +53,20 @@ type AnalyzeRequest struct {
 }
 
 type AnalyzeResponse struct {
-	Status           string   `json:"status"`
-	Error            string   `json:"error,omitempty"`
-	Code             string   `json:"code,omitempty"`
-	ID               string   `json:"id,omitempty"`
-	Name             string   `json:"name,omitempty"`
-	Type             string   `json:"type,omitempty"`
-	Branch           string   `json:"branch,omitempty"`
-	Domain           string   `json:"domain,omitempty"`
-	APIDomain        string   `json:"api_domain,omitempty"`
-	RequiresDatabase bool     `json:"requires_database"`
-	DetectedPorts    []int    `json:"detected_ports,omitempty"`
-	Evidence         []string `json:"evidence,omitempty"`
+	Status           string                 `json:"status"`
+	Error            string                 `json:"error,omitempty"`
+	Code             string                 `json:"code,omitempty"`
+	ID               string                 `json:"id,omitempty"`
+	Name             string                 `json:"name,omitempty"`
+	Type             string                 `json:"type,omitempty"`
+	Branch           string                 `json:"branch,omitempty"`
+	Domain           string                 `json:"domain,omitempty"`
+	APIDomain        string                 `json:"api_domain,omitempty"`
+	RequiresDatabase bool                   `json:"requires_database"`
+	DetectedPorts    []int                  `json:"detected_ports,omitempty"`
+	Evidence         []string               `json:"evidence,omitempty"`
+	Services         []services.ServiceSpec `json:"services,omitempty"`
+	Commit           string                 `json:"commit,omitempty"`
 }
 
 func generateID() string {
@@ -174,7 +176,7 @@ func Analyze(req AnalyzeRequest) AnalyzeResponse {
 		}
 	}
 
-	result, err := rm.DetectProjectType()
+	result, err := rm.DetectServicePlan()
 	if err != nil {
 		return AnalyzeResponse{
 			Status: "error",
@@ -211,5 +213,7 @@ func Analyze(req AnalyzeRequest) AnalyzeResponse {
 		RequiresDatabase: result.RequiresDatabase,
 		DetectedPorts:    result.DetectedPorts,
 		Evidence:         result.Evidence,
+		Services:         result.Services,
+		Commit:           result.Commit,
 	}
 }

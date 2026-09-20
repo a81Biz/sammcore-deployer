@@ -23,18 +23,32 @@ const (
 )
 
 type Project struct {
-	ID               string        `json:"id"`
-	Name             string        `json:"name"`
-	Repo             string        `json:"repo"`
-	Branch           string        `json:"branch"`
-	Type             string        `json:"type"`
-	Namespace        string        `json:"namespace"`
-	Domain           string        `json:"domain"`
-	APIDomain        string        `json:"api_domain,omitempty"`
-	RequiresDatabase bool          `json:"requires_database"`
-	Status           ProjectStatus `json:"status"`
-	CreatedAt        time.Time     `json:"created_at"`
-	UpdatedAt        time.Time     `json:"updated_at"`
+	ID               string            `json:"id"`
+	Name             string            `json:"name"`
+	Repo             string            `json:"repo"`
+	Branch           string            `json:"branch"`
+	Type             string            `json:"type"`
+	Namespace        string            `json:"namespace"`
+	Domain           string            `json:"domain"`
+	APIDomain        string            `json:"api_domain,omitempty"`
+	RequiresDatabase bool              `json:"requires_database"`
+	Status           ProjectStatus     `json:"status"`
+	Services         []ServiceInfo     `json:"services,omitempty"`
+	Commit           string            `json:"commit,omitempty"`
+	Images           map[string]string `json:"images,omitempty"`
+	Env              map[string]string `json:"env,omitempty"`
+	LastError        string            `json:"last_error,omitempty"`
+	CreatedAt        time.Time         `json:"created_at"`
+	UpdatedAt        time.Time         `json:"updated_at"`
+}
+
+// ServiceInfo es la representación persistible de un servicio (espejo de services.ServiceSpec)
+type ServiceInfo struct {
+	Name         string `json:"name"`
+	Role         string `json:"role"`
+	Port         int    `json:"port,omitempty"`
+	BuildContext string `json:"build_context,omitempty"`
+	Dockerfile   string `json:"dockerfile,omitempty"`
 }
 
 var mu sync.Mutex

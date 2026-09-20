@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { analyzeRepo, deployProject, DeployPayload } from "../services/api";
+import { analyzeRepo, deployProject, DeployPayload, ServiceSpec } from "../services/api";
 
 export default function RegistrarProyecto() {
   const navigate = useNavigate();
@@ -16,12 +16,7 @@ export default function RegistrarProyecto() {
   const [projectName, setProjectName] = useState("");
   const [projectType, setProjectType] = useState("compose");
   const [requiresDatabase, setRequiresDatabase] = useState(false);
-  const [webPort, setWebPort] = useState<number>(80);
-  const [apiPort, setApiPort] = useState<number>(8000);
-  const [appPort, setAppPort] = useState<number>(8080);
-  const [webImage, setWebImage] = useState("");
-  const [apiImage, setApiImage] = useState("");
-  const [appImage, setAppImage] = useState("");
+  const [services, setServices] = useState<ServiceSpec[]>([]);
   const [envVars, setEnvVars] = useState<{ key: string; value: string }[]>([]);
   const [newEnvKey, setNewEnvKey] = useState("");
   const [newEnvVal, setNewEnvVal] = useState("");
@@ -52,14 +47,12 @@ export default function RegistrarProyecto() {
       setProjectType(data.type || "compose");
       setRequiresDatabase(Boolean(data.requires_database));
 
-      if (data.type === "compose") {
-        setWebPort(80);
-        setApiPort(8000);
-        setWebImage(`ghcr.io/a81biz/${name}-web:latest`);
-        setApiImage(`ghcr.io/a81biz/${name}-api:latest`);
+      // Poblar servicios desde el análisis
+      if (data.services && data.services.length > 0) {
+        setServices(data.services.map((s: ServiceSpec) => ({ ...s })));
       } else {
-        setAppPort(8080);
-        setAppImage(`ghcr.io/a81biz/${name}:latest`);
+        // Fallback: un servicio genérico
+        setServices([{ name: "app", role: "app", port: 8080, build_context: ".", dockerfile: "Dockerfile" }]);
       }
     } catch (err: any) {
       setErrorAnalyze(err.message || "Error al analizar el repositorio.");
@@ -67,6 +60,12 @@ export default function RegistrarProyecto() {
     } finally {
       setLoadingAnalyze(false);
     }
+  };
+
+  const handleServiceChange = (index: number, field: keyof ServiceSpec, value: string | number) => {
+    const updated = [...services];
+    (updated[index] as any)[field] = value;
+    setServices(updated);
   };
 
   const handleAddEnv = () => {
@@ -102,20 +101,9 @@ export default function RegistrarProyecto() {
       branch: branch.trim() || "main",
       type: projectType,
       requires_database: requiresDatabase,
+      services: services,
       build_args: Object.keys(buildArgsObj).length > 0 ? buildArgsObj : undefined,
     };
-
-    if (projectType === "compose") {
-      payload.web_image = webImage || `ghcr.io/a81biz/${projectName}-web:latest`;
-      payload.api_image = apiImage || `ghcr.io/a81biz/${projectName}-api:latest`;
-      payload.web_port = Number(webPort) || 80;
-      payload.api_port = Number(apiPort) || 8000;
-    } else if (projectType === "dockerfile") {
-      payload.app_image = appImage || `ghcr.io/a81biz/${projectName}:latest`;
-      payload.app_port = Number(appPort) || 8080;
-    } else {
-      payload.static_image = "nginx:alpine";
-    }
 
     try {
       const res = await deployProject(payload);
@@ -126,6 +114,10 @@ export default function RegistrarProyecto() {
       setLoadingDeploy(false);
     }
   };
+
+  // Derivar dominios de los servicios
+  const webService = services.find(s => s.role === "web");
+  const apiService = services.find(s => s.role === "api" || s.role === "app");
 
   const cardStyle: React.CSSProperties = {
     background: "#1c1c24",
@@ -155,6 +147,13 @@ export default function RegistrarProyecto() {
     color: "#b0b0c0",
   };
 
+  const roleColors: Record<string, string> = {
+    web: "#22c55e",
+    api: "#3b82f6",
+    worker: "#a855f7",
+    app: "#f59e0b",
+  };
+
   return (
     <div style={{ maxWidth: "900px", margin: "30px auto", padding: "0 20px", color: "#e0e0e8", fontFamily: "system-ui, sans-serif" }}>
       <div style={{ marginBottom: "28px" }}>
@@ -162,7 +161,7 @@ export default function RegistrarProyecto() {
           🚀 Registrar y Desplegar Proyecto
         </h1>
         <p style={{ margin: 0, color: "#8a8a9e", fontSize: "0.95rem" }}>
-          Inspecciona automáticamente repositorios de GitHub, configura subdominios dinámicos y publica aplicaciones en el clúster K3s de SAMMCORE.
+          Inspecciona automáticamente repositorios de GitHub, detecta servicios y puertos, construye imágenes vía Kaniko y publica en el clúster K3s de SAMMCORE.
         </p>
       </div>
 
@@ -261,7 +260,7 @@ export default function RegistrarProyecto() {
                   required
                 />
                 <span style={{ fontSize: "0.75rem", color: "#8a8a9e" }}>
-                  Solo minúsculas alfanuméricas y guiones.
+                  Solo minúsculas alfanuméricas y guiones. 3-35 caracteres.
                 </span>
               </div>
               <div>
@@ -271,7 +270,7 @@ export default function RegistrarProyecto() {
                   onChange={(e) => setProjectType(e.target.value)}
                   style={{ ...inputStyle, cursor: "pointer" }}
                 >
-                  <option value="compose">Docker Compose (Microservicios Web + API)</option>
+                  <option value="compose">Docker Compose (Microservicios)</option>
                   <option value="dockerfile">Dockerfile (Contenedor Único)</option>
                   <option value="static">Sitio Estático (Frontend NGINX)</option>
                 </select>
@@ -283,12 +282,19 @@ export default function RegistrarProyecto() {
               <div style={{ fontSize: "0.85rem", color: "#93c5fd", fontWeight: 600, marginBottom: "4px" }}>
                 🌐 Subdominios Dinámicos que se publicarán:
               </div>
-              <div style={{ fontSize: "0.9rem", color: "#bfdbfe" }}>
-                • Frontend: <code>https://{projectName || "<proyecto>"}.sammcore.local</code>
-              </div>
-              {projectType === "compose" && (
+              {webService && (
                 <div style={{ fontSize: "0.9rem", color: "#bfdbfe" }}>
-                  • API Backend: <code>https://{projectName || "<proyecto>"}-api.sammcore.local</code>
+                  • Frontend: <code>https://{projectName || "<proyecto>"}.sammcore.local</code> → puerto {webService.port}
+                </div>
+              )}
+              {apiService && projectType === "compose" && (
+                <div style={{ fontSize: "0.9rem", color: "#bfdbfe" }}>
+                  • API Backend: <code>https://{projectName || "<proyecto>"}-api.sammcore.local</code> → puerto {apiService.port}
+                </div>
+              )}
+              {!webService && apiService && (
+                <div style={{ fontSize: "0.9rem", color: "#bfdbfe" }}>
+                  • App: <code>https://{projectName || "<proyecto>"}.sammcore.local</code> → puerto {apiService.port}
                 </div>
               )}
             </div>
@@ -307,68 +313,86 @@ export default function RegistrarProyecto() {
               </label>
             </div>
 
-            {/* Configuración de Imágenes según el Tipo */}
-            {projectType === "compose" ? (
-              <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr", gap: "16px", marginBottom: "16px" }}>
-                <div>
-                  <label style={labelStyle}>Imagen Docker Web (Frontend)</label>
-                  <input
-                    type="text"
-                    value={webImage}
-                    onChange={(e) => setWebImage(e.target.value)}
-                    style={inputStyle}
-                  />
-                </div>
-                <div>
-                  <label style={labelStyle}>Puerto Web</label>
-                  <input
-                    type="number"
-                    value={webPort}
-                    onChange={(e) => setWebPort(Number(e.target.value))}
-                    style={inputStyle}
-                  />
-                </div>
-                <div>
-                  <label style={labelStyle}>Imagen Docker API (Backend)</label>
-                  <input
-                    type="text"
-                    value={apiImage}
-                    onChange={(e) => setApiImage(e.target.value)}
-                    style={inputStyle}
-                  />
-                </div>
-                <div>
-                  <label style={labelStyle}>Puerto API</label>
-                  <input
-                    type="number"
-                    value={apiPort}
-                    onChange={(e) => setApiPort(Number(e.target.value))}
-                    style={inputStyle}
-                  />
-                </div>
+            {/* Tabla de Servicios Detectados */}
+            <div style={{ marginBottom: "20px" }}>
+              <label style={{ ...labelStyle, marginBottom: "10px" }}>📦 Servicios Detectados ({services.length})</label>
+              <div style={{ background: "#121216", borderRadius: "6px", border: "1px solid #2d2d3a", overflow: "hidden" }}>
+                <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.88rem" }}>
+                  <thead>
+                    <tr style={{ background: "#1a1a25", borderBottom: "1px solid #2d2d3a" }}>
+                      <th style={{ padding: "10px 12px", textAlign: "left", color: "#8a8a9e", fontWeight: 600 }}>Servicio</th>
+                      <th style={{ padding: "10px 12px", textAlign: "left", color: "#8a8a9e", fontWeight: 600 }}>Rol</th>
+                      <th style={{ padding: "10px 12px", textAlign: "left", color: "#8a8a9e", fontWeight: 600 }}>Puerto</th>
+                      <th style={{ padding: "10px 12px", textAlign: "left", color: "#8a8a9e", fontWeight: 600 }}>Contexto Build</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {services.map((svc, idx) => (
+                      <tr key={idx} style={{ borderBottom: idx < services.length - 1 ? "1px solid #22222a" : "none" }}>
+                        <td style={{ padding: "8px 12px" }}>
+                          <code style={{ color: "#e0e0e8" }}>{svc.name}</code>
+                        </td>
+                        <td style={{ padding: "8px 12px" }}>
+                          <select
+                            value={svc.role}
+                            onChange={(e) => handleServiceChange(idx, "role", e.target.value)}
+                            style={{
+                              padding: "4px 8px",
+                              background: "#1c1c24",
+                              border: `1px solid ${roleColors[svc.role] || "#3d3d4d"}`,
+                              color: roleColors[svc.role] || "#e0e0e8",
+                              borderRadius: "4px",
+                              fontSize: "0.85rem",
+                              cursor: "pointer",
+                            }}
+                          >
+                            <option value="web">🌐 Web</option>
+                            <option value="api">⚙️ API</option>
+                            <option value="worker">🔧 Worker</option>
+                            <option value="app">📦 App</option>
+                          </select>
+                        </td>
+                        <td style={{ padding: "8px 12px" }}>
+                          <input
+                            type="number"
+                            value={svc.port || ""}
+                            onChange={(e) => handleServiceChange(idx, "port", Number(e.target.value) || 0)}
+                            placeholder={svc.role === "worker" ? "—" : "80"}
+                            style={{
+                              ...inputStyle,
+                              width: "80px",
+                              padding: "4px 8px",
+                              fontSize: "0.85rem",
+                            }}
+                          />
+                        </td>
+                        <td style={{ padding: "8px 12px" }}>
+                          <code style={{ color: "#8a8a9e", fontSize: "0.82rem" }}>
+                            {svc.build_context || "."}
+                            {svc.dockerfile ? `/${svc.dockerfile}` : ""}
+                          </code>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+                {services.length === 0 && (
+                  <div style={{ padding: "16px", textAlign: "center", color: "#6b7280" }}>
+                    No se detectaron servicios. Ejecute el análisis primero.
+                  </div>
+                )}
               </div>
-            ) : projectType === "dockerfile" ? (
-              <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr", gap: "16px", marginBottom: "16px" }}>
-                <div>
-                  <label style={labelStyle}>Imagen Docker App</label>
-                  <input
-                    type="text"
-                    value={appImage}
-                    onChange={(e) => setAppImage(e.target.value)}
-                    style={inputStyle}
-                  />
-                </div>
-                <div>
-                  <label style={labelStyle}>Puerto App</label>
-                  <input
-                    type="number"
-                    value={appPort}
-                    onChange={(e) => setAppPort(Number(e.target.value))}
-                    style={inputStyle}
-                  />
-                </div>
+              <span style={{ fontSize: "0.75rem", color: "#6b7280", marginTop: "4px", display: "block" }}>
+                Las imágenes se construyen automáticamente vía Kaniko en el clúster. Los puertos se leen del Dockerfile de cada servicio.
+              </span>
+            </div>
+
+            {/* Commit detectado */}
+            {analysisData?.commit && (
+              <div style={{ marginBottom: "16px", fontSize: "0.85rem", color: "#6b7280" }}>
+                📎 Commit detectado: <code style={{ color: "#a5b4fc" }}>{analysisData.commit.substring(0, 12)}</code>
               </div>
-            ) : null}
+            )}
 
             {/* Variables de Entorno / Build Args */}
             <div style={{ marginBottom: "24px" }}>
@@ -445,7 +469,7 @@ export default function RegistrarProyecto() {
                 boxShadow: "0 4px 14px rgba(37,99,235,0.4)",
               }}
             >
-              {loadingDeploy ? "⏳ Desplegando en el Clúster SAMMCORE..." : "🚀 Confirmar y Desplegar en SAMMCORE"}
+              {loadingDeploy ? "⏳ Construyendo imágenes y desplegando en SAMMCORE..." : "🚀 Confirmar y Desplegar en SAMMCORE"}
             </button>
           </form>
         </div>
@@ -459,7 +483,7 @@ export default function RegistrarProyecto() {
           </h3>
           <p style={{ margin: "0 0 16px 0", color: "#bbf7d0", fontSize: "0.95rem", lineHeight: 1.5 }}>
             El proyecto <strong>{projectName}</strong> ha sido enviado a la cola de orquestación de Kubernetes.
-            El deployer creará el Namespace, aprovisionará la base de datos en PostgreSQL, aplicará los Secrets y expondrá los subdominios Ingress.
+            El deployer construirá las imágenes vía Kaniko, creará el Namespace, aprovisionará la base de datos y expondrá los subdominios Ingress.
           </p>
           <div style={{ display: "flex", gap: "12px" }}>
             <button
@@ -481,6 +505,7 @@ export default function RegistrarProyecto() {
                 setDeploySuccess(null);
                 setAnalysisData(null);
                 setRepo("");
+                setServices([]);
               }}
               style={{
                 padding: "10px 20px",

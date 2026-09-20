@@ -157,7 +157,10 @@ func deleteProjectHandler(w http.ResponseWriter, r *http.Request) {
 
 	dm := getDeployManager()
 	if dm != nil {
-		_ = dm.DeleteProjectDeployment(r.Context(), p.Name, deleteDB)
+		if err := dm.DeleteProjectDeployment(r.Context(), p.Name, deleteDB); err != nil {
+			writeJSONError(w, http.StatusInternalServerError, err.Error(), "DELETE_FAILED")
+			return
+		}
 	}
 
 	if err := storage.DeleteProject(id); err != nil {
@@ -227,6 +230,36 @@ func projectMetricsHandler(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(metrics)
 }
 
+// serviceSpecsToStorageInfo convierte ServiceSpec[] a storage.ServiceInfo[] para persistencia
+func serviceSpecsToStorageInfo(specs []services.ServiceSpec) []storage.ServiceInfo {
+	result := make([]storage.ServiceInfo, len(specs))
+	for i, s := range specs {
+		result[i] = storage.ServiceInfo{
+			Name:         s.Name,
+			Role:         string(s.Role),
+			Port:         s.Port,
+			BuildContext: s.BuildContext,
+			Dockerfile:   s.Dockerfile,
+		}
+	}
+	return result
+}
+
+// storageInfoToServiceSpecs convierte storage.ServiceInfo[] de vuelta a ServiceSpec[]
+func storageInfoToServiceSpecs(infos []storage.ServiceInfo) []services.ServiceSpec {
+	result := make([]services.ServiceSpec, len(infos))
+	for i, info := range infos {
+		result[i] = services.ServiceSpec{
+			Name:         info.Name,
+			Role:         services.ServiceRole(info.Role),
+			Port:         info.Port,
+			BuildContext: info.BuildContext,
+			Dockerfile:   info.Dockerfile,
+		}
+	}
+	return result
+}
+
 func redeployHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	id := mux.Vars(r)["id"]
@@ -238,30 +271,36 @@ func redeployHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	p.Status = storage.StatusDeploying
+	p.LastError = ""
 	p.UpdatedAt = time.Now()
 	_ = storage.AddOrUpdateProject(*p)
 
 	dm := getDeployManager()
-	if dm != nil {
-		manifestParams := services.ProjectManifestParams{
-			ProjectName:      p.Name,
-			Namespace:        p.Namespace,
-			Type:             p.Type,
-			Domain:           p.Domain,
-			APIDomain:        p.APIDomain,
-			RequiresDatabase: p.RequiresDatabase,
-			WebPort:          80,
-			APIPort:          8000,
-			AppPort:          8080,
-			WebImage:         fmt.Sprintf("ghcr.io/a81biz/%s-web:latest", p.Name),
-			APIImage:         fmt.Sprintf("ghcr.io/a81biz/%s-api:latest", p.Name),
-			AppImage:         fmt.Sprintf("ghcr.io/a81biz/%s:latest", p.Name),
-			StaticImage:      "nginx:alpine",
-		}
-		go func() {
-			_ = dm.ExecuteDeploy(context.Background(), *p, manifestParams)
-		}()
+	if dm == nil {
+		writeJSONError(w, http.StatusServiceUnavailable, "Gestor de despliegue no disponible", "DEPLOYER_UNAVAILABLE")
+		return
 	}
+
+	// Reconstruir parámetros desde los datos persistidos del proyecto
+	svcSpecs := storageInfoToServiceSpecs(p.Services)
+	manifestParams := services.ProjectManifestParams{
+		ProjectName:      p.Name,
+		Namespace:        p.Namespace,
+		Type:             p.Type,
+		Domain:           p.Domain,
+		APIDomain:        p.APIDomain,
+		RequiresDatabase: p.RequiresDatabase,
+		Services:         svcSpecs,
+		Images:           p.Images,
+		HasCustomEnv:     len(p.Env) > 0,
+		BuildArgs:        p.Env,
+	}
+
+	go func() {
+		if err := dm.ExecuteDeploy(context.Background(), *p, manifestParams); err != nil {
+			_ = err // Error ya persistido en LastError por ExecuteDeploy
+		}
+	}()
 
 	w.WriteHeader(http.StatusAccepted)
 	_ = json.NewEncoder(w).Encode(map[string]interface{}{
@@ -295,6 +334,12 @@ func deployHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Validar nombre del proyecto
+	if err := services.ValidateProjectName(name); err != nil {
+		writeJSONError(w, http.StatusBadRequest, err.Error(), "INVALID_PROJECT_NAME")
+		return
+	}
+
 	pType := req.Type
 	if pType == "" {
 		pType = "compose"
@@ -310,6 +355,17 @@ func deployHandler(w http.ResponseWriter, r *http.Request) {
 		reqDB = *req.RequiresDatabase
 	} else if pType == "compose" {
 		reqDB = true
+	}
+
+	// Usar servicios del request (enviados por la UI) o re-analizar
+	svcSpecs := req.Services
+	commit := ""
+	if len(svcSpecs) == 0 {
+		analyzed := core.Analyze(core.AnalyzeRequest{Repo: repo, Branch: branch})
+		if analyzed.Status == "ok" {
+			svcSpecs = analyzed.Services
+			commit = analyzed.Commit
+		}
 	}
 
 	projectID := strings.ToLower(core.DeriveDeterministicID(repo))
@@ -330,6 +386,9 @@ func deployHandler(w http.ResponseWriter, r *http.Request) {
 		APIDomain:        apiDomain,
 		RequiresDatabase: reqDB,
 		Status:           storage.StatusProvisioning,
+		Services:         serviceSpecsToStorageInfo(svcSpecs),
+		Commit:           commit,
+		Env:              req.BuildArgs,
 		CreatedAt:        time.Now(),
 		UpdatedAt:        time.Now(),
 	}
@@ -348,39 +407,15 @@ func deployHandler(w http.ResponseWriter, r *http.Request) {
 			Domain:           domain,
 			APIDomain:        apiDomain,
 			RequiresDatabase: reqDB,
-			WebImage:         req.WebImage,
-			WebPort:          req.WebPort,
-			APIImage:         req.APIImage,
-			APIPort:          req.APIPort,
-			AppImage:         req.AppImage,
-			StaticImage:      req.StaticImage,
+			Services:         svcSpecs,
 			HasCustomEnv:     len(req.BuildArgs) > 0,
 			BuildArgs:        req.BuildArgs,
 		}
-		if manifestParams.WebPort == 0 {
-			manifestParams.WebPort = 80
-		}
-		if manifestParams.APIPort == 0 {
-			manifestParams.APIPort = 8000
-		}
-		if manifestParams.AppPort == 0 {
-			manifestParams.AppPort = 8080
-		}
-		if manifestParams.WebImage == "" {
-			manifestParams.WebImage = fmt.Sprintf("ghcr.io/a81biz/%s-web:latest", name)
-		}
-		if manifestParams.APIImage == "" {
-			manifestParams.APIImage = fmt.Sprintf("ghcr.io/a81biz/%s-api:latest", name)
-		}
-		if manifestParams.AppImage == "" {
-			manifestParams.AppImage = fmt.Sprintf("ghcr.io/a81biz/%s:latest", name)
-		}
-		if manifestParams.StaticImage == "" {
-			manifestParams.StaticImage = "nginx:alpine"
-		}
 
 		go func() {
-			_ = dm.ExecuteDeploy(context.Background(), proj, manifestParams)
+			if err := dm.ExecuteDeploy(context.Background(), proj, manifestParams); err != nil {
+				_ = err // Error ya persistido en LastError por ExecuteDeploy
+			}
 		}()
 	}
 

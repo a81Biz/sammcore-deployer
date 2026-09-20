@@ -7,22 +7,19 @@ import (
 	"text/template"
 )
 
+// ProjectManifestParams contiene los parámetros para renderizar manifiestos de Kubernetes.
+// En v2 usa Services[] en lugar de campos de imagen/puerto fijos.
 type ProjectManifestParams struct {
-	ProjectName      string `json:"project_name"`
-	Namespace        string `json:"namespace"`
-	Type             string `json:"type"` // compose, dockerfile, static
-	Domain           string `json:"domain"`
-	APIDomain        string `json:"api_domain,omitempty"`
-	RequiresDatabase bool   `json:"requires_database"`
-	WebImage         string `json:"web_image,omitempty"`
-	WebPort          int    `json:"web_port,omitempty"`
-	APIImage         string `json:"api_image,omitempty"`
-	APIPort          int    `json:"api_port,omitempty"`
-	AppImage         string            `json:"app_image,omitempty"`
-	AppPort          int               `json:"app_port,omitempty"`
-	StaticImage      string            `json:"static_image,omitempty"`
+	ProjectName      string            `json:"project_name"`
+	Namespace        string            `json:"namespace"`
+	Type             string            `json:"type"` // compose, dockerfile, static
+	Domain           string            `json:"domain"`
+	APIDomain        string            `json:"api_domain,omitempty"`
+	RequiresDatabase bool              `json:"requires_database"`
 	HasCustomEnv     bool              `json:"has_custom_env"`
 	BuildArgs        map[string]string `json:"build_args,omitempty"`
+	Services         []ServiceSpec     `json:"services,omitempty"`
+	Images           map[string]string `json:"images,omitempty"` // servicio → imagen completa
 }
 
 const baseManifestsTemplate = `apiVersion: v1
@@ -113,81 +110,39 @@ spec:
               - 192.168.0.0/16
 `
 
-const composeAppTemplate = `apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: {{ .ProjectName }}-web
-  namespace: {{ .Namespace }}
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: {{ .ProjectName }}-web
-  template:
-    metadata:
-      labels:
-        app: {{ .ProjectName }}-web
-    spec:
-      automountServiceAccountToken: false
-      imagePullSecrets:
-        - name: sammcore-registry-secret
-      containers:
-        - name: web
-          image: {{ .WebImage }}
-          imagePullPolicy: IfNotPresent
-          ports:
-            - name: http
-              containerPort: {{ .WebPort }}
-          readinessProbe:
-            tcpSocket:
-              port: {{ .WebPort }}
-            initialDelaySeconds: 3
-            periodSeconds: 5
-          livenessProbe:
-            tcpSocket:
-              port: {{ .WebPort }}
-            initialDelaySeconds: 10
-            periodSeconds: 10
-          resources:
-            requests:
-              cpu: 25m
-              memory: 32Mi
-            limits:
-              cpu: 200m
-              memory: 128Mi
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: {{ .ProjectName }}-web
-  namespace: {{ .Namespace }}
-spec:
-  type: ClusterIP
-  selector:
-    app: {{ .ProjectName }}-web
-  ports:
-    - name: http
-      port: {{ .WebPort }}
-      targetPort: {{ .WebPort }}
----
+// serviceDeploymentData es la estructura que alimenta la plantilla por servicio
+type serviceDeploymentData struct {
+	ProjectName      string
+	Namespace        string
+	ServiceName      string // nombre del servicio (ej: "frontend", "backend")
+	FullName         string // ProjectName-ServiceName (ej: "backroom-frontend")
+	Role             string // "web", "api", "worker", "app"
+	Image            string
+	Port             int
+	RequiresDatabase bool
+	HasCustomEnv     bool
+	IsAPIOrWorker    bool // true si necesita envFrom con secrets
+}
+
+// deploymentTemplate genera un Deployment + Service (si tiene puerto) por cada servicio
+const serviceDeploymentTemplate = `---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ .ProjectName }}-api
+  name: {{ .FullName }}
   namespace: {{ .Namespace }}
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: {{ .ProjectName }}-api
+      app: {{ .FullName }}
   template:
     metadata:
       labels:
-        app: {{ .ProjectName }}-api
+        app: {{ .FullName }}
+        role: {{ .Role }}
     spec:
       automountServiceAccountToken: false
-      imagePullSecrets:
-        - name: sammcore-registry-secret
       {{- if .RequiresDatabase }}
       initContainers:
         - name: wait-for-db
@@ -202,12 +157,15 @@ spec:
               memory: 32Mi
       {{- end }}
       containers:
-        - name: api
-          image: {{ .APIImage }}
+        - name: {{ .ServiceName }}
+          image: {{ .Image }}
           imagePullPolicy: IfNotPresent
+          {{- if gt .Port 0 }}
           ports:
             - name: http
-              containerPort: {{ .APIPort }}
+              containerPort: {{ .Port }}
+          {{- end }}
+          {{- if .IsAPIOrWorker }}
           {{- if or .RequiresDatabase .HasCustomEnv }}
           envFrom:
             {{- if .RequiresDatabase }}
@@ -219,38 +177,47 @@ spec:
                 name: {{ .ProjectName }}-env-secrets
             {{- end }}
           {{- end }}
+          {{- end }}
+          {{- if gt .Port 0 }}
           readinessProbe:
             tcpSocket:
-              port: {{ .APIPort }}
+              port: {{ .Port }}
             initialDelaySeconds: 5
             periodSeconds: 10
           livenessProbe:
             tcpSocket:
-              port: {{ .APIPort }}
+              port: {{ .Port }}
             initialDelaySeconds: 15
-            periodSeconds: 20
+            periodSeconds: 30
+          {{- end }}
           resources:
             requests:
               cpu: 50m
               memory: 64Mi
             limits:
               cpu: 500m
-              memory: 512Mi
----
+              memory: 256Mi
+`
+
+const serviceTemplate = `---
 apiVersion: v1
 kind: Service
 metadata:
-  name: {{ .ProjectName }}-api
+  name: {{ .FullName }}
   namespace: {{ .Namespace }}
 spec:
   type: ClusterIP
   selector:
-    app: {{ .ProjectName }}-api
+    app: {{ .FullName }}
   ports:
     - name: http
-      port: {{ .APIPort }}
-      targetPort: {{ .APIPort }}
----
+      port: {{ .Port }}
+      targetPort: {{ .Port }}
+`
+
+// serviceAliasTemplate crea un Service alias "backend" que apunta al servicio API,
+// permitiendo que el nginx del frontend haga proxy_pass a http://backend:<port>
+const serviceAliasTemplate = `---
 apiVersion: v1
 kind: Service
 metadata:
@@ -259,12 +226,28 @@ metadata:
 spec:
   type: ClusterIP
   selector:
-    app: {{ .ProjectName }}-api
+    app: {{ .FullName }}
   ports:
     - name: http
-      port: {{ .APIPort }}
-      targetPort: {{ .APIPort }}
----
+      port: {{ .Port }}
+      targetPort: {{ .Port }}
+`
+
+// ingressRuleData es la estructura para una regla individual de Ingress
+type ingressRuleData struct {
+	Host        string
+	ServiceName string
+	Port        int
+}
+
+// ingressData agrupa todas las reglas de Ingress para el proyecto
+type ingressData struct {
+	ProjectName string
+	Namespace   string
+	Rules       []ingressRuleData
+}
+
+const ingressTemplate = `---
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
@@ -275,191 +258,18 @@ metadata:
 spec:
   ingressClassName: nginx
   rules:
-    - host: {{ .Domain }}
+    {{- range .Rules }}
+    - host: {{ .Host }}
       http:
         paths:
           - path: /
             pathType: Prefix
             backend:
               service:
-                name: {{ .ProjectName }}-web
+                name: {{ .ServiceName }}
                 port:
-                  number: {{ .WebPort }}
-    {{- if .APIDomain }}
-    - host: {{ .APIDomain }}
-      http:
-        paths:
-          - path: /
-            pathType: Prefix
-            backend:
-              service:
-                name: {{ .ProjectName }}-api
-                port:
-                  number: {{ .APIPort }}
+                  number: {{ .Port }}
     {{- end }}
-`
-
-const dockerfileAppTemplate = `apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: {{ .ProjectName }}-app
-  namespace: {{ .Namespace }}
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: {{ .ProjectName }}-app
-  template:
-    metadata:
-      labels:
-        app: {{ .ProjectName }}-app
-    spec:
-      automountServiceAccountToken: false
-      imagePullSecrets:
-        - name: sammcore-registry-secret
-      {{- if .RequiresDatabase }}
-      initContainers:
-        - name: wait-for-db
-          image: busybox:1.36
-          command: ['sh', '-c', 'until nc -z -w 2 postgres.supabase.svc.cluster.local 5432; do sleep 2; done']
-          resources:
-            requests:
-              cpu: 10m
-              memory: 16Mi
-            limits:
-              cpu: 50m
-              memory: 32Mi
-      {{- end }}
-      containers:
-        - name: app
-          image: {{ .AppImage }}
-          imagePullPolicy: IfNotPresent
-          ports:
-            - name: http
-              containerPort: {{ .AppPort }}
-          {{- if or .RequiresDatabase .HasCustomEnv }}
-          envFrom:
-            {{- if .RequiresDatabase }}
-            - secretRef:
-                name: {{ .ProjectName }}-db-secrets
-            {{- end }}
-            {{- if .HasCustomEnv }}
-            - secretRef:
-                name: {{ .ProjectName }}-env-secrets
-            {{- end }}
-          {{- end }}
-          readinessProbe:
-            tcpSocket:
-              port: {{ .AppPort }}
-            initialDelaySeconds: 5
-            periodSeconds: 10
-          resources:
-            requests:
-              cpu: 50m
-              memory: 64Mi
-            limits:
-              cpu: 500m
-              memory: 256Mi
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: {{ .ProjectName }}-app
-  namespace: {{ .Namespace }}
-spec:
-  type: ClusterIP
-  selector:
-    app: {{ .ProjectName }}-app
-  ports:
-    - name: http
-      port: {{ .AppPort }}
-      targetPort: {{ .AppPort }}
----
-apiVersion: networking.k8s.io/v1
-kind: Ingress
-metadata:
-  name: {{ .ProjectName }}-ingress
-  namespace: {{ .Namespace }}
-spec:
-  ingressClassName: nginx
-  rules:
-    - host: {{ .Domain }}
-      http:
-        paths:
-          - path: /
-            pathType: Prefix
-            backend:
-              service:
-                name: {{ .ProjectName }}-app
-                port:
-                  number: {{ .AppPort }}
-`
-
-const staticAppTemplate = `apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: {{ .ProjectName }}-static
-  namespace: {{ .Namespace }}
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: {{ .ProjectName }}-static
-  template:
-    metadata:
-      labels:
-        app: {{ .ProjectName }}-static
-    spec:
-      automountServiceAccountToken: false
-      imagePullSecrets:
-        - name: sammcore-registry-secret
-      containers:
-        - name: nginx
-          image: {{ .StaticImage }}
-          imagePullPolicy: IfNotPresent
-          ports:
-            - name: http
-              containerPort: 80
-          resources:
-            requests:
-              cpu: 10m
-              memory: 16Mi
-            limits:
-              cpu: 100m
-              memory: 64Mi
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: {{ .ProjectName }}-static
-  namespace: {{ .Namespace }}
-spec:
-  type: ClusterIP
-  selector:
-    app: {{ .ProjectName }}-static
-  ports:
-    - name: http
-      port: 80
-      targetPort: 80
----
-apiVersion: networking.k8s.io/v1
-kind: Ingress
-metadata:
-  name: {{ .ProjectName }}-ingress
-  namespace: {{ .Namespace }}
-spec:
-  ingressClassName: nginx
-  rules:
-    - host: {{ .Domain }}
-      http:
-        paths:
-          - path: /
-            pathType: Prefix
-            backend:
-              service:
-                name: {{ .ProjectName }}-static
-                port:
-                  number: 80
 `
 
 type TemplateManager struct{}
@@ -482,42 +292,133 @@ func (tm *TemplateManager) RenderBaseManifests(params ProjectManifestParams) (st
 	return buf.String(), nil
 }
 
-func (tm *TemplateManager) RenderAppManifests(params ProjectManifestParams) (string, error) {
-	var rawTemplate string
-	switch strings.ToLower(params.Type) {
-	case "compose":
-		rawTemplate = composeAppTemplate
-	case "dockerfile":
-		rawTemplate = dockerfileAppTemplate
-	case "static":
-		rawTemplate = staticAppTemplate
-	default:
-		return "", fmt.Errorf("tipo de proyecto no soportado para generación de manifiestos: %s", params.Type)
+// RenderServiceManifests genera los Deployments, Services e Ingress para todos los servicios del proyecto
+func (tm *TemplateManager) RenderServiceManifests(params ProjectManifestParams) (string, error) {
+	depTmpl, err := template.New("deployment").Parse(serviceDeploymentTemplate)
+	if err != nil {
+		return "", fmt.Errorf("error al parsear plantilla de deployment: %w", err)
 	}
 
-	tmpl, err := template.New("app").Parse(rawTemplate)
+	svcTmpl, err := template.New("service").Parse(serviceTemplate)
 	if err != nil {
-		return "", fmt.Errorf("error al parsear plantilla de aplicación (%s): %w", params.Type, err)
+		return "", fmt.Errorf("error al parsear plantilla de service: %w", err)
+	}
+
+	aliasTmpl, err := template.New("alias").Parse(serviceAliasTemplate)
+	if err != nil {
+		return "", fmt.Errorf("error al parsear plantilla de alias: %w", err)
+	}
+
+	ingTmpl, err := template.New("ingress").Parse(ingressTemplate)
+	if err != nil {
+		return "", fmt.Errorf("error al parsear plantilla de ingress: %w", err)
 	}
 
 	var buf bytes.Buffer
-	if err := tmpl.Execute(&buf, params); err != nil {
-		return "", fmt.Errorf("error al renderizar manifiesto de aplicación (%s): %w", params.Type, err)
+	var ingressRules []ingressRuleData
+	var apiService *serviceDeploymentData
+
+	for _, svc := range params.Services {
+		image := ""
+		if params.Images != nil {
+			image = params.Images[svc.Name]
+		}
+		if image == "" {
+			continue // Sin imagen, no se puede desplegar
+		}
+
+		fullName := fmt.Sprintf("%s-%s", params.ProjectName, svc.Name)
+		isAPIOrWorker := svc.Role == RoleAPI || svc.Role == RoleWorker || svc.Role == RoleApp
+
+		data := serviceDeploymentData{
+			ProjectName:      params.ProjectName,
+			Namespace:        params.Namespace,
+			ServiceName:      svc.Name,
+			FullName:         fullName,
+			Role:             string(svc.Role),
+			Image:            image,
+			Port:             svc.Port,
+			RequiresDatabase: params.RequiresDatabase && isAPIOrWorker,
+			HasCustomEnv:     params.HasCustomEnv && isAPIOrWorker,
+			IsAPIOrWorker:    isAPIOrWorker,
+		}
+
+		// Renderizar Deployment
+		if err := depTmpl.Execute(&buf, data); err != nil {
+			return "", fmt.Errorf("error al renderizar deployment para %s: %w", svc.Name, err)
+		}
+
+		// Renderizar Service (solo si tiene puerto y no es worker)
+		if svc.Port > 0 && svc.Role != RoleWorker {
+			if err := svcTmpl.Execute(&buf, data); err != nil {
+				return "", fmt.Errorf("error al renderizar service para %s: %w", svc.Name, err)
+			}
+		}
+
+		// Registrar servicio API para el alias "backend"
+		if svc.Role == RoleAPI || svc.Role == RoleApp {
+			apiService = &data
+		}
+
+		// Construir reglas de Ingress
+		switch svc.Role {
+		case RoleWeb:
+			ingressRules = append(ingressRules, ingressRuleData{
+				Host:        params.Domain,
+				ServiceName: fullName,
+				Port:        svc.Port,
+			})
+		case RoleAPI, RoleApp:
+			host := params.Domain
+			if params.APIDomain != "" && svc.Role == RoleAPI {
+				host = params.APIDomain
+			}
+			ingressRules = append(ingressRules, ingressRuleData{
+				Host:        host,
+				ServiceName: fullName,
+				Port:        svc.Port,
+			})
+		}
+	}
+
+	// Service alias "backend" para que nginx del frontend pueda hacer proxy_pass
+	if apiService != nil {
+		if err := aliasTmpl.Execute(&buf, apiService); err != nil {
+			return "", fmt.Errorf("error al renderizar alias backend: %w", err)
+		}
+	}
+
+	// Renderizar Ingress con todas las reglas
+	if len(ingressRules) > 0 {
+		ingData := ingressData{
+			ProjectName: params.ProjectName,
+			Namespace:   params.Namespace,
+			Rules:       ingressRules,
+		}
+		if err := ingTmpl.Execute(&buf, ingData); err != nil {
+			return "", fmt.Errorf("error al renderizar ingress: %w", err)
+		}
 	}
 
 	return buf.String(), nil
 }
 
+// RenderAllManifests genera los manifiestos base (namespace, quota, netpol) y los de aplicación (deployments, services, ingress)
 func (tm *TemplateManager) RenderAllManifests(params ProjectManifestParams) (string, error) {
 	base, err := tm.RenderBaseManifests(params)
 	if err != nil {
 		return "", err
 	}
 
-	app, err := tm.RenderAppManifests(params)
+	app, err := tm.RenderServiceManifests(params)
 	if err != nil {
 		return "", err
 	}
 
-	return fmt.Sprintf("%s---\n%s", base, app), nil
+	return fmt.Sprintf("%s\n%s", strings.TrimSpace(base), strings.TrimSpace(app)), nil
+}
+
+// RenderAppManifests mantiene compatibilidad con código existente pero usa la nueva lógica per-service
+func (tm *TemplateManager) RenderAppManifests(params ProjectManifestParams) (string, error) {
+	return tm.RenderServiceManifests(params)
 }

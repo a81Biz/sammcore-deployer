@@ -244,3 +244,227 @@ func TestDetectProjectType_Unknown(t *testing.T) {
 		t.Errorf("expected ProjectUnknown, got %v", res.Type)
 	}
 }
+
+// === Tests para DetectServicePlan ===
+
+func TestDetectServicePlan_Compose_BackroomLike(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "test-serviceplan-backroom-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	// Crear estructura similar a Backroom
+	composeContent := `
+services:
+  db:
+    image: postgres:15-alpine
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: backroom
+      POSTGRES_USER: user
+      POSTGRES_PASSWORD: pass
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    ports:
+      - "8080:8080"
+    depends_on:
+      - db
+  worker:
+    build:
+      context: ./worker
+      dockerfile: Dockerfile
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    ports:
+      - "8443:443"
+      - "80:80"
+`
+	if err := os.WriteFile(filepath.Join(tmpDir, "docker-compose.yml"), []byte(composeContent), 0644); err != nil {
+		t.Fatalf("failed to write compose file: %v", err)
+	}
+
+	// Crear Dockerfiles en los subdirectorios
+	for _, dir := range []string{"backend", "worker", "frontend"} {
+		os.MkdirAll(filepath.Join(tmpDir, dir), 0755)
+	}
+	os.WriteFile(filepath.Join(tmpDir, "backend", "Dockerfile"), []byte("FROM golang:1.24\nEXPOSE 8080\n"), 0644)
+	os.WriteFile(filepath.Join(tmpDir, "worker", "Dockerfile"), []byte("FROM python:3.12\n"), 0644)
+	os.WriteFile(filepath.Join(tmpDir, "frontend", "Dockerfile"), []byte("FROM node:20 AS build\nFROM nginx:alpine\nEXPOSE 80 443\n"), 0644)
+
+	rm := NewRepoManager("", "", tmpDir, false)
+	res, err := rm.DetectServicePlan()
+	if err != nil {
+		t.Fatalf("DetectServicePlan returned error: %v", err)
+	}
+
+	if res.Type != ProjectCompose {
+		t.Fatalf("expected ProjectCompose, got %v", res.Type)
+	}
+
+	// Debe haber 3 servicios (db filtrado)
+	if len(res.Services) != 3 {
+		t.Fatalf("expected 3 services (db filtered), got %d: %+v", len(res.Services), res.Services)
+	}
+
+	// Verificar que están ordenados por nombre: backend, frontend, worker
+	expected := []struct {
+		name string
+		role ServiceRole
+		port int
+	}{
+		{"backend", RoleAPI, 8080},
+		{"frontend", RoleWeb, 80},
+		{"worker", RoleWorker, 0},
+	}
+
+	for i, exp := range expected {
+		svc := res.Services[i]
+		if svc.Name != exp.name {
+			t.Errorf("service[%d] name: expected %q, got %q", i, exp.name, svc.Name)
+		}
+		if svc.Role != exp.role {
+			t.Errorf("service[%d] %s role: expected %v, got %v", i, exp.name, exp.role, svc.Role)
+		}
+		if svc.Port != exp.port {
+			t.Errorf("service[%d] %s port: expected %d, got %d", i, exp.name, exp.port, svc.Port)
+		}
+		if svc.IsDB {
+			t.Errorf("service[%d] %s should not be marked as DB", i, exp.name)
+		}
+	}
+
+	// Verificar que RequiresDatabase se detectó
+	if !res.RequiresDatabase {
+		t.Errorf("expected RequiresDatabase to be true")
+	}
+}
+
+func TestDetectServicePlan_Compose_PortFromDockerfile(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "test-serviceplan-port-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	// Compose sin ports definidos pero con Dockerfile que tiene EXPOSE
+	composeContent := `
+services:
+  api:
+    build: ./api
+`
+	os.WriteFile(filepath.Join(tmpDir, "docker-compose.yml"), []byte(composeContent), 0644)
+	os.MkdirAll(filepath.Join(tmpDir, "api"), 0755)
+	os.WriteFile(filepath.Join(tmpDir, "api", "Dockerfile"), []byte("FROM golang:1.24\nEXPOSE 3000\nCMD [\"./server\"]\n"), 0644)
+
+	rm := NewRepoManager("", "", tmpDir, false)
+	res, err := rm.DetectServicePlan()
+	if err != nil {
+		t.Fatalf("DetectServicePlan error: %v", err)
+	}
+
+	if len(res.Services) != 1 {
+		t.Fatalf("expected 1 service, got %d", len(res.Services))
+	}
+
+	svc := res.Services[0]
+	if svc.Port != 3000 {
+		t.Errorf("expected port 3000 from Dockerfile EXPOSE, got %d", svc.Port)
+	}
+	if svc.BuildContext != "./api" {
+		t.Errorf("expected build_context './api', got %q", svc.BuildContext)
+	}
+}
+
+func TestDetectServicePlan_Dockerfile(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "test-serviceplan-df-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	os.WriteFile(filepath.Join(tmpDir, "Dockerfile"), []byte("FROM alpine\nEXPOSE 9090\n"), 0644)
+
+	rm := NewRepoManager("", "", tmpDir, false)
+	res, err := rm.DetectServicePlan()
+	if err != nil {
+		t.Fatalf("DetectServicePlan error: %v", err)
+	}
+
+	if res.Type != ProjectDockerfile {
+		t.Fatalf("expected ProjectDockerfile, got %v", res.Type)
+	}
+	if len(res.Services) != 1 {
+		t.Fatalf("expected 1 service, got %d", len(res.Services))
+	}
+	if res.Services[0].Name != "app" {
+		t.Errorf("expected service name 'app', got %q", res.Services[0].Name)
+	}
+	if res.Services[0].Role != RoleApp {
+		t.Errorf("expected role 'app', got %v", res.Services[0].Role)
+	}
+	if res.Services[0].Port != 9090 {
+		t.Errorf("expected port 9090, got %d", res.Services[0].Port)
+	}
+}
+
+func TestDetectServicePlan_Static(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "test-serviceplan-static-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	os.WriteFile(filepath.Join(tmpDir, "index.html"), []byte("<html></html>"), 0644)
+
+	rm := NewRepoManager("", "", tmpDir, false)
+	res, err := rm.DetectServicePlan()
+	if err != nil {
+		t.Fatalf("DetectServicePlan error: %v", err)
+	}
+
+	if res.Type != ProjectStatic {
+		t.Fatalf("expected ProjectStatic, got %v", res.Type)
+	}
+	if len(res.Services) != 1 {
+		t.Fatalf("expected 1 service, got %d", len(res.Services))
+	}
+	if res.Services[0].Role != RoleWeb {
+		t.Errorf("expected role 'web', got %v", res.Services[0].Role)
+	}
+	if res.Services[0].Port != 80 {
+		t.Errorf("expected port 80, got %d", res.Services[0].Port)
+	}
+}
+
+func TestInferServiceRole(t *testing.T) {
+	tests := []struct {
+		name     string
+		expected ServiceRole
+	}{
+		{"frontend", RoleWeb},
+		{"web-app", RoleWeb},
+		{"ui", RoleWeb},
+		{"client-panel", RoleWeb},
+		{"backend", RoleAPI},
+		{"api-gateway", RoleAPI},
+		{"server", RoleAPI},
+		{"worker", RoleWorker},
+		{"queue-processor", RoleWorker},
+		{"cron-jobs", RoleWorker},
+		{"consumer", RoleWorker},
+		{"unknown-thing", RoleAPI}, // default
+	}
+
+	for _, tt := range tests {
+		got := inferServiceRole(tt.name)
+		if got != tt.expected {
+			t.Errorf("inferServiceRole(%q) = %v, want %v", tt.name, got, tt.expected)
+		}
+	}
+}

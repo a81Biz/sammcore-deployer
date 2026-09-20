@@ -7,10 +7,13 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -21,19 +24,23 @@ import (
 	"sammcore-deployer/storage"
 )
 
+var validProjectName = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`)
+
+// deployLocks es un mutex por proyecto para evitar deploys/redeploys concurrentes
+var deployLocks sync.Map
+
+func getProjectLock(name string) *sync.Mutex {
+	val, _ := deployLocks.LoadOrStore(name, &sync.Mutex{})
+	return val.(*sync.Mutex)
+}
+
 type DeployRequest struct {
 	Name             string            `json:"name"`
 	Repo             string            `json:"repo"`
 	Branch           string            `json:"branch,omitempty"`
 	Type             string            `json:"type,omitempty"`
 	RequiresDatabase *bool             `json:"requires_database,omitempty"`
-	WebImage         string            `json:"web_image,omitempty"`
-	APIImage         string            `json:"api_image,omitempty"`
-	AppImage         string            `json:"app_image,omitempty"`
-	StaticImage      string            `json:"static_image,omitempty"`
-	WebPort          int               `json:"web_port,omitempty"`
-	APIPort          int               `json:"api_port,omitempty"`
-	AppPort          int               `json:"app_port,omitempty"`
+	Services         []ServiceSpec     `json:"services,omitempty"`
 	BuildArgs        map[string]string `json:"build_args,omitempty"`
 }
 
@@ -41,6 +48,7 @@ type DeployManager struct {
 	kubeClient      kubernetes.Interface
 	secretManager   *SecretManager
 	templateManager *TemplateManager
+	buildManager    *BuildManager
 }
 
 func NewDeployManager(kubeClient kubernetes.Interface) *DeployManager {
@@ -48,13 +56,46 @@ func NewDeployManager(kubeClient kubernetes.Interface) *DeployManager {
 		kubeClient:      kubeClient,
 		secretManager:   NewSecretManager(kubeClient),
 		templateManager: NewTemplateManager(),
+		buildManager:    NewBuildManager(kubeClient),
 	}
 }
 
-// ApplyManifestsYAML deserializa un YAML multi-documento y aplica los recursos en K8s
+// ValidateProjectName valida que el nombre cumpla RFC 1123, longitud 3-35, y no sea reservado
+func ValidateProjectName(name string) error {
+	if len(name) < 3 || len(name) > 35 {
+		return fmt.Errorf("el nombre del proyecto debe tener entre 3 y 35 caracteres (actual: %d)", len(name))
+	}
+	if !validProjectName.MatchString(name) {
+		return fmt.Errorf("el nombre del proyecto '%s' no cumple RFC 1123: solo minúsculas, dígitos y guiones, sin empezar ni terminar en guión", name)
+	}
+	if isReservedProjectName(name) {
+		return fmt.Errorf("el nombre '%s' está reservado y no puede usarse como proyecto", name)
+	}
+	if strings.HasSuffix(name, "-api") || strings.HasSuffix(name, "-docs") {
+		return fmt.Errorf("el nombre '%s' no puede terminar en '-api' ni '-docs' para evitar colisiones de subdominios", name)
+	}
+	return nil
+}
+
+func isReservedProjectName(name string) bool {
+	reserved := map[string]bool{
+		"deployer": true, "supabase": true, "monitoring": true,
+		"ingress-nginx": true, "default": true, "api": true,
+		"docs": true, "admin": true, "grafana": true,
+		"prometheus": true, "traefik": true, "portainer": true,
+		"sammcore-registry": true, "deployer-builds": true,
+	}
+	if strings.HasPrefix(name, "kube-") {
+		return true
+	}
+	return reserved[name]
+}
+
+// ApplyManifestsYAML deserializa un YAML multi-documento y aplica los recursos en K8s.
+// A diferencia de la versión anterior, ahora retorna error en unmarshal fallidos y kinds no soportados.
 func (dm *DeployManager) ApplyManifestsYAML(ctx context.Context, rawYAML string) error {
 	docs := strings.Split(rawYAML, "\n---")
-	for _, doc := range docs {
+	for i, doc := range docs {
 		trimmed := strings.TrimSpace(doc)
 		if trimmed == "" {
 			continue
@@ -62,64 +103,101 @@ func (dm *DeployManager) ApplyManifestsYAML(ctx context.Context, rawYAML string)
 
 		var typeMeta metav1.TypeMeta
 		if err := k8syaml.Unmarshal([]byte(trimmed), &typeMeta); err != nil {
-			continue
+			return fmt.Errorf("error al deserializar TypeMeta en documento %d: %w", i, err)
 		}
 
 		switch typeMeta.Kind {
 		case "Namespace":
 			var ns corev1.Namespace
-			if err := k8syaml.Unmarshal([]byte(trimmed), &ns); err == nil && ns.Name != "" {
+			if err := k8syaml.Unmarshal([]byte(trimmed), &ns); err != nil {
+				return fmt.Errorf("error al deserializar Namespace: %w", err)
+			}
+			if ns.Name != "" {
 				if err := dm.applyNamespace(ctx, &ns); err != nil {
 					return fmt.Errorf("error al aplicar Namespace %s: %w", ns.Name, err)
 				}
 			}
 		case "ResourceQuota":
 			var rq corev1.ResourceQuota
-			if err := k8syaml.Unmarshal([]byte(trimmed), &rq); err == nil && rq.Name != "" {
+			if err := k8syaml.Unmarshal([]byte(trimmed), &rq); err != nil {
+				return fmt.Errorf("error al deserializar ResourceQuota: %w", err)
+			}
+			if rq.Name != "" {
 				if err := dm.applyResourceQuota(ctx, &rq); err != nil {
 					return fmt.Errorf("error al aplicar ResourceQuota %s: %w", rq.Name, err)
 				}
 			}
 		case "LimitRange":
 			var lr corev1.LimitRange
-			if err := k8syaml.Unmarshal([]byte(trimmed), &lr); err == nil && lr.Name != "" {
+			if err := k8syaml.Unmarshal([]byte(trimmed), &lr); err != nil {
+				return fmt.Errorf("error al deserializar LimitRange: %w", err)
+			}
+			if lr.Name != "" {
 				if err := dm.applyLimitRange(ctx, &lr); err != nil {
 					return fmt.Errorf("error al aplicar LimitRange %s: %w", lr.Name, err)
 				}
 			}
 		case "NetworkPolicy":
 			var np networkingv1.NetworkPolicy
-			if err := k8syaml.Unmarshal([]byte(trimmed), &np); err == nil && np.Name != "" {
+			if err := k8syaml.Unmarshal([]byte(trimmed), &np); err != nil {
+				return fmt.Errorf("error al deserializar NetworkPolicy: %w", err)
+			}
+			if np.Name != "" {
 				if err := dm.applyNetworkPolicy(ctx, &np); err != nil {
 					return fmt.Errorf("error al aplicar NetworkPolicy %s: %w", np.Name, err)
 				}
 			}
 		case "Deployment":
 			var dep appsv1.Deployment
-			if err := k8syaml.Unmarshal([]byte(trimmed), &dep); err == nil && dep.Name != "" {
+			if err := k8syaml.Unmarshal([]byte(trimmed), &dep); err != nil {
+				return fmt.Errorf("error al deserializar Deployment: %w", err)
+			}
+			if dep.Name != "" {
 				if err := dm.applyDeployment(ctx, &dep); err != nil {
 					return fmt.Errorf("error al aplicar Deployment %s: %w", dep.Name, err)
 				}
 			}
 		case "Service":
 			var svc corev1.Service
-			if err := k8syaml.Unmarshal([]byte(trimmed), &svc); err == nil && svc.Name != "" {
+			if err := k8syaml.Unmarshal([]byte(trimmed), &svc); err != nil {
+				return fmt.Errorf("error al deserializar Service: %w", err)
+			}
+			if svc.Name != "" {
 				if err := dm.applyService(ctx, &svc); err != nil {
 					return fmt.Errorf("error al aplicar Service %s: %w", svc.Name, err)
 				}
 			}
 		case "Ingress":
 			var ing networkingv1.Ingress
-			if err := k8syaml.Unmarshal([]byte(trimmed), &ing); err == nil && ing.Name != "" {
+			if err := k8syaml.Unmarshal([]byte(trimmed), &ing); err != nil {
+				return fmt.Errorf("error al deserializar Ingress: %w", err)
+			}
+			if ing.Name != "" {
 				if err := dm.applyIngress(ctx, &ing); err != nil {
 					return fmt.Errorf("error al aplicar Ingress %s: %w", ing.Name, err)
 				}
 			}
+		case "Job":
+			var job batchv1.Job
+			if err := k8syaml.Unmarshal([]byte(trimmed), &job); err != nil {
+				return fmt.Errorf("error al deserializar Job: %w", err)
+			}
+			if job.Name != "" {
+				if err := dm.applyJob(ctx, &job); err != nil {
+					return fmt.Errorf("error al aplicar Job %s: %w", job.Name, err)
+				}
+			}
+		case "":
+			continue // Documento vacío
+		default:
+			return fmt.Errorf("tipo de recurso Kubernetes no soportado: %s (documento %d)", typeMeta.Kind, i)
 		}
 	}
 	return nil
 }
 
+// applyNamespace verifica ownership antes de crear/actualizar.
+// Rechaza namespaces que existen sin la label managed-by=sammcore-deployer.
 func (dm *DeployManager) applyNamespace(ctx context.Context, ns *corev1.Namespace) error {
 	existing, err := dm.kubeClient.CoreV1().Namespaces().Get(ctx, ns.Name, metav1.GetOptions{})
 	if err != nil {
@@ -129,6 +207,12 @@ func (dm *DeployManager) applyNamespace(ctx context.Context, ns *corev1.Namespac
 		}
 		return err
 	}
+
+	// Verificar ownership: solo actualizar si el NS fue creado por sammcore-deployer
+	if existing.Labels["app.kubernetes.io/managed-by"] != "sammcore-deployer" {
+		return fmt.Errorf("el namespace '%s' existe pero no está gestionado por sammcore-deployer (falta label managed-by). Operación rechazada por seguridad", ns.Name)
+	}
+
 	ns.ResourceVersion = existing.ResourceVersion
 	_, err = dm.kubeClient.CoreV1().Namespaces().Update(ctx, ns, metav1.UpdateOptions{})
 	return err
@@ -219,6 +303,25 @@ func (dm *DeployManager) applyIngress(ctx context.Context, ing *networkingv1.Ing
 	return err
 }
 
+func (dm *DeployManager) applyJob(ctx context.Context, job *batchv1.Job) error {
+	existing, err := dm.kubeClient.BatchV1().Jobs(job.Namespace).Get(ctx, job.Name, metav1.GetOptions{})
+	if err != nil {
+		if errors.IsNotFound(err) {
+			_, err := dm.kubeClient.BatchV1().Jobs(job.Namespace).Create(ctx, job, metav1.CreateOptions{})
+			return err
+		}
+		return err
+	}
+	// Los Jobs no se pueden actualizar; eliminar y recrear
+	propagation := metav1.DeletePropagationBackground
+	_ = dm.kubeClient.BatchV1().Jobs(job.Namespace).Delete(ctx, existing.Name, metav1.DeleteOptions{
+		PropagationPolicy: &propagation,
+	})
+	time.Sleep(2 * time.Second)
+	_, err = dm.kubeClient.BatchV1().Jobs(job.Namespace).Create(ctx, job, metav1.CreateOptions{})
+	return err
+}
+
 // GetPodLogs retorna los logs recientes del pod principal de un proyecto
 func (dm *DeployManager) GetPodLogs(ctx context.Context, namespace string, tailLines int64) (string, error) {
 	pods, err := dm.kubeClient.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{})
@@ -230,7 +333,6 @@ func (dm *DeployManager) GetPodLogs(ctx context.Context, namespace string, tailL
 		return "No se encontraron pods activos en el namespace " + namespace, nil
 	}
 
-	// Seleccionar el pod principal (el primero disponible)
 	targetPod := pods.Items[0].Name
 
 	req := dm.kubeClient.CoreV1().Pods(namespace).GetLogs(targetPod, &corev1.PodLogOptions{
@@ -290,7 +392,6 @@ func (dm *DeployManager) GetProjectMetrics(ctx context.Context, p storage.Projec
 		QuotaLimits: make(map[string]string),
 	}
 
-	// 1. Obtener Pods del namespace
 	pods, err := dm.kubeClient.CoreV1().Pods(p.Namespace).List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("error listando pods en %s: %w", p.Namespace, err)
@@ -298,7 +399,6 @@ func (dm *DeployManager) GetProjectMetrics(ctx context.Context, p storage.Projec
 
 	metrics.PodsCount = len(pods.Items)
 
-	// 2. Intentar consultar métricas crudas de metrics-server
 	type rawMetricList struct {
 		Items []struct {
 			Metadata struct {
@@ -335,7 +435,6 @@ func (dm *DeployManager) GetProjectMetrics(ctx context.Context, p storage.Projec
 		}
 	}
 
-	// 3. Ensamblar información por cada pod
 	for _, pod := range pods.Items {
 		var totalRestarts int32
 		allReady := true
@@ -370,7 +469,6 @@ func (dm *DeployManager) GetProjectMetrics(ctx context.Context, p storage.Projec
 		metrics.Pods = append(metrics.Pods, podInfo)
 	}
 
-	// 4. Consultar ResourceQuota
 	quotas, errQ := dm.kubeClient.CoreV1().ResourceQuotas(p.Namespace).List(ctx, metav1.ListOptions{})
 	if errQ == nil && len(quotas.Items) > 0 {
 		q := quotas.Items[0]
@@ -385,8 +483,18 @@ func (dm *DeployManager) GetProjectMetrics(ctx context.Context, p storage.Projec
 	return metrics, nil
 }
 
-// DeleteProjectDeployment desmantela el namespace y condicionalmente la BD en Postgres central
+// DeleteProjectDeployment desmantela el namespace y condicionalmente la BD en Postgres central.
+// Verifica ownership del namespace antes de eliminar.
 func (dm *DeployManager) DeleteProjectDeployment(ctx context.Context, projectName string, deleteDB bool) error {
+	// Verificar que el namespace pertenece a sammcore-deployer
+	existing, err := dm.kubeClient.CoreV1().Namespaces().Get(ctx, projectName, metav1.GetOptions{})
+	if err != nil && !errors.IsNotFound(err) {
+		return fmt.Errorf("error al verificar namespace %s: %w", projectName, err)
+	}
+	if existing != nil && existing.Labels["app.kubernetes.io/managed-by"] != "sammcore-deployer" {
+		return fmt.Errorf("el namespace '%s' no está gestionado por sammcore-deployer, eliminación rechazada", projectName)
+	}
+
 	// 1. Eliminar base de datos si se solicita
 	if deleteDB {
 		host, port, user, password, dbname := GetSupabaseConfig()
@@ -399,7 +507,7 @@ func (dm *DeployManager) DeleteProjectDeployment(ctx context.Context, projectNam
 	}
 
 	// 2. Eliminar Namespace en Kubernetes
-	err := dm.kubeClient.CoreV1().Namespaces().Delete(ctx, projectName, metav1.DeleteOptions{})
+	err = dm.kubeClient.CoreV1().Namespaces().Delete(ctx, projectName, metav1.DeleteOptions{})
 	if err != nil && !errors.IsNotFound(err) {
 		return fmt.Errorf("error al eliminar namespace %s: %w", projectName, err)
 	}
@@ -407,60 +515,87 @@ func (dm *DeployManager) DeleteProjectDeployment(ctx context.Context, projectNam
 	return nil
 }
 
-// ExecuteDeploy ejecuta la secuencia completa de despliegue
+// updateProjectStatus actualiza el estado y opcionalmente el error del proyecto
+func updateProjectStatus(p *storage.Project, status storage.ProjectStatus, lastError string) {
+	p.Status = status
+	p.LastError = lastError
+	p.UpdatedAt = time.Now()
+	_ = storage.AddOrUpdateProject(*p)
+}
+
+// ExecuteDeploy ejecuta la secuencia completa de despliegue con mutex por proyecto:
+// 1. Validar namespace (ownership)
+// 2. Provisionar BD si necesita
+// 3. Construir imágenes vía Kaniko (BuildManager)
+// 4. Renderizar y aplicar manifiestos K8s
+// 5. Monitorear rollout
 func (dm *DeployManager) ExecuteDeploy(ctx context.Context, p storage.Project, params ProjectManifestParams) error {
+	// Mutex por proyecto: evitar deploys concurrentes
+	lock := getProjectLock(p.Name)
+	lock.Lock()
+	defer lock.Unlock()
+
 	projectName := p.Name
 	namespace := p.Namespace
 
 	// 1. Si requiere base de datos, aprovisionar en PostgreSQL Supabase (Modelo A)
 	if params.RequiresDatabase {
-		p.Status = storage.StatusProvisioning
-		_ = storage.AddOrUpdateProject(p)
+		updateProjectStatus(&p, storage.StatusProvisioning, "")
 
 		host, port, user, password, dbname := GetSupabaseConfig()
 		if password == "" {
-			log.Printf("[Deploy] ⚠️ SUPABASE_POSTGRES_PASSWORD no establecida, saltando aprovisionamiento físico de BD")
-		} else {
-			masterDB, err := OpenMasterDB(host, port, user, password, dbname)
-			if err != nil {
-				log.Printf("[Deploy] Error conectando a Supabase DB: %v", err)
-			} else {
-				existingPass, _ := dm.secretManager.GetExistingDBPassword(ctx, namespace, projectName)
-				if existingPass == "" && params.BuildArgs != nil {
-					for _, k := range []string{"DB_PASSWORD", "POSTGRES_PASSWORD", "DATABASE_PASSWORD", "DB_PASS"} {
-						if p, ok := params.BuildArgs[k]; ok && strings.TrimSpace(p) != "" {
-							existingPass = strings.TrimSpace(p)
-							break
-						}
-					}
-				}
-				provRes, err := ProvisionProjectDatabase(masterDB, projectName, existingPass)
-				_ = masterDB.Close()
-				if err != nil {
-					p.Status = storage.StatusFailed
-					_ = storage.AddOrUpdateProject(p)
-					return fmt.Errorf("fallo al aprovisionar BD: %w", err)
-				}
+			errMsg := "SUPABASE_POSTGRES_PASSWORD no establecida, no se puede aprovisionar BD"
+			log.Printf("[Deploy] ⚠️ %s", errMsg)
+			updateProjectStatus(&p, storage.StatusFailed, errMsg)
+			return fmt.Errorf(errMsg)
+		}
 
-				// Crear namespace previo para poder inyectar el Secret
-				nsObj := &corev1.Namespace{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: namespace,
-						Labels: map[string]string{
-							"app.kubernetes.io/managed-by":       "sammcore-deployer",
-							"project":                            projectName,
-							"pod-security.kubernetes.io/enforce": "baseline",
-						},
-					},
-				}
-				_ = dm.applyNamespace(ctx, nsObj)
+		masterDB, err := OpenMasterDB(host, port, user, password, dbname)
+		if err != nil {
+			errMsg := fmt.Sprintf("error conectando a Supabase DB: %v", err)
+			log.Printf("[Deploy] %s", errMsg)
+			updateProjectStatus(&p, storage.StatusFailed, errMsg)
+			return fmt.Errorf(errMsg)
+		}
 
-				if err := dm.secretManager.EnsureDBSecret(ctx, namespace, projectName, provRes); err != nil {
-					p.Status = storage.StatusFailed
-					_ = storage.AddOrUpdateProject(p)
-					return fmt.Errorf("fallo al crear DB secret: %w", err)
+		existingPass, _ := dm.secretManager.GetExistingDBPassword(ctx, namespace, projectName)
+		if existingPass == "" && params.BuildArgs != nil {
+			for _, k := range []string{"DB_PASSWORD", "POSTGRES_PASSWORD", "DATABASE_PASSWORD", "DB_PASS"} {
+				if pw, ok := params.BuildArgs[k]; ok && strings.TrimSpace(pw) != "" {
+					existingPass = strings.TrimSpace(pw)
+					break
 				}
 			}
+		}
+		provRes, err := ProvisionProjectDatabase(masterDB, projectName, existingPass)
+		_ = masterDB.Close()
+		if err != nil {
+			errMsg := fmt.Sprintf("fallo al aprovisionar BD: %v", err)
+			updateProjectStatus(&p, storage.StatusFailed, errMsg)
+			return fmt.Errorf(errMsg)
+		}
+
+		// Crear namespace previo para poder inyectar el Secret
+		nsObj := &corev1.Namespace{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: namespace,
+				Labels: map[string]string{
+					"app.kubernetes.io/managed-by":       "sammcore-deployer",
+					"project":                            projectName,
+					"pod-security.kubernetes.io/enforce": "baseline",
+				},
+			},
+		}
+		if err := dm.applyNamespace(ctx, nsObj); err != nil {
+			errMsg := fmt.Sprintf("fallo al crear namespace para BD: %v", err)
+			updateProjectStatus(&p, storage.StatusFailed, errMsg)
+			return fmt.Errorf(errMsg)
+		}
+
+		if err := dm.secretManager.EnsureDBSecret(ctx, namespace, projectName, provRes); err != nil {
+			errMsg := fmt.Sprintf("fallo al crear DB secret: %v", err)
+			updateProjectStatus(&p, storage.StatusFailed, errMsg)
+			return fmt.Errorf(errMsg)
 		}
 	}
 
@@ -476,59 +611,119 @@ func (dm *DeployManager) ExecuteDeploy(ctx context.Context, p storage.Project, p
 				},
 			},
 		}
-		_ = dm.applyNamespace(ctx, nsObj)
-		_ = dm.secretManager.EnsureCustomEnvSecret(ctx, namespace, projectName, params.BuildArgs)
+		if err := dm.applyNamespace(ctx, nsObj); err != nil {
+			errMsg := fmt.Sprintf("fallo al crear namespace para env secrets: %v", err)
+			updateProjectStatus(&p, storage.StatusFailed, errMsg)
+			return fmt.Errorf(errMsg)
+		}
+		if err := dm.secretManager.EnsureCustomEnvSecret(ctx, namespace, projectName, params.BuildArgs); err != nil {
+			errMsg := fmt.Sprintf("fallo al crear env secret: %v", err)
+			updateProjectStatus(&p, storage.StatusFailed, errMsg)
+			return fmt.Errorf(errMsg)
+		}
 	}
 
-	// 2. Renderizar y aplicar manifiestos
-	p.Status = storage.StatusDeploying
-	_ = storage.AddOrUpdateProject(p)
+	// 2. Construir imágenes vía Kaniko (solo si hay servicios con BuildContext)
+	if len(params.Services) > 0 && p.Commit != "" {
+		updateProjectStatus(&p, storage.StatusBuilding, "")
+
+		images, err := dm.buildManager.EnsureImages(ctx, p, params.Services, p.Commit)
+		if err != nil {
+			errMsg := fmt.Sprintf("fallo al construir imágenes: %v", err)
+			updateProjectStatus(&p, storage.StatusFailed, errMsg)
+			return fmt.Errorf(errMsg)
+		}
+
+		params.Images = images
+		p.Images = images
+		_ = storage.AddOrUpdateProject(p)
+	}
+
+	// 3. Renderizar y aplicar manifiestos
+	updateProjectStatus(&p, storage.StatusDeploying, "")
 
 	manifestsYAML, err := dm.templateManager.RenderAllManifests(params)
 	if err != nil {
-		p.Status = storage.StatusFailed
-		_ = storage.AddOrUpdateProject(p)
-		return fmt.Errorf("error renderizando manifiestos: %w", err)
+		errMsg := fmt.Sprintf("error renderizando manifiestos: %v", err)
+		updateProjectStatus(&p, storage.StatusFailed, errMsg)
+		return fmt.Errorf(errMsg)
 	}
 
 	if err := dm.ApplyManifestsYAML(ctx, manifestsYAML); err != nil {
-		p.Status = storage.StatusFailed
-		_ = storage.AddOrUpdateProject(p)
-		return fmt.Errorf("error aplicando manifiestos en K8s: %w", err)
+		errMsg := fmt.Sprintf("error aplicando manifiestos en K8s: %v", err)
+		updateProjectStatus(&p, storage.StatusFailed, errMsg)
+		return fmt.Errorf(errMsg)
 	}
 
-	// Propagar sammcore-registry-secret si está presente en el namespace deployer
-	_ = dm.secretManager.EnsureRegistrySecret(ctx, namespace)
-
-	// 3. Monitorear despliegue (hasta 30s)
+	// 4. Monitorear despliegue
 	go dm.monitorRollout(context.Background(), p)
 
 	return nil
 }
 
+// monitorRollout verifica el estado de los Deployments hasta que todos estén listos.
+// Si excede el deadline, marca el proyecto como FAILED con el motivo detallado.
 func (dm *DeployManager) monitorRollout(ctx context.Context, p storage.Project) {
-	deadline := time.Now().Add(60 * time.Second)
+	deadline := time.Now().Add(120 * time.Second)
 	for time.Now().Before(deadline) {
-		time.Sleep(3 * time.Second)
+		time.Sleep(5 * time.Second)
 		deps, err := dm.kubeClient.AppsV1().Deployments(p.Namespace).List(ctx, metav1.ListOptions{})
-		if err == nil && len(deps.Items) > 0 {
-			allReady := true
-			for _, d := range deps.Items {
-				if d.Status.ReadyReplicas < 1 {
-					allReady = false
-					break
-				}
+		if err != nil || len(deps.Items) == 0 {
+			continue
+		}
+
+		allReady := true
+		for _, d := range deps.Items {
+			if d.Status.ReadyReplicas < 1 {
+				allReady = false
+				break
 			}
-			if allReady {
-				p.Status = storage.StatusRunning
-				_ = storage.AddOrUpdateProject(p)
-				log.Printf("[Deploy] Proyecto %s desplegado exitosamente en Running", p.Name)
-				return
+		}
+		if allReady {
+			updateProjectStatus(&p, storage.StatusRunning, "")
+			log.Printf("[Deploy] Proyecto %s desplegado exitosamente en Running", p.Name)
+			return
+		}
+	}
+
+	// TIMEOUT: recopilar motivos de fallo de los pods
+	failReason := dm.collectFailureReasons(ctx, p.Namespace)
+	errMsg := fmt.Sprintf("timeout esperando rollout (120s): %s", failReason)
+	log.Printf("[Deploy] ⚠️ Proyecto %s: %s", p.Name, errMsg)
+	updateProjectStatus(&p, storage.StatusFailed, errMsg)
+}
+
+// collectFailureReasons examina los pods del namespace y recopila los motivos de fallo
+func (dm *DeployManager) collectFailureReasons(ctx context.Context, namespace string) string {
+	pods, err := dm.kubeClient.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return "no se pudieron listar pods"
+	}
+
+	var reasons []string
+	for _, pod := range pods.Items {
+		for _, cs := range pod.Status.ContainerStatuses {
+			if cs.Ready {
+				continue
+			}
+			if cs.State.Waiting != nil {
+				reason := cs.State.Waiting.Reason
+				msg := cs.State.Waiting.Message
+				entry := fmt.Sprintf("pod=%s container=%s reason=%s", pod.Name, cs.Name, reason)
+				if msg != "" {
+					entry += " msg=" + msg
+				}
+				reasons = append(reasons, entry)
+			}
+			if cs.State.Terminated != nil && cs.State.Terminated.ExitCode != 0 {
+				reasons = append(reasons, fmt.Sprintf("pod=%s container=%s terminated exitCode=%d reason=%s",
+					pod.Name, cs.Name, cs.State.Terminated.ExitCode, cs.State.Terminated.Reason))
 			}
 		}
 	}
 
-	// Si superó deadline sin que todos los pods estén listos
-	p.Status = storage.StatusRunning // Marcamos running si no falló explícitamente
-	_ = storage.AddOrUpdateProject(p)
+	if len(reasons) == 0 {
+		return "pods no están listos (sin motivo específico reportado)"
+	}
+	return strings.Join(reasons, "; ")
 }

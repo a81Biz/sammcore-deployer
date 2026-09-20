@@ -106,8 +106,10 @@ func TestDeployAndManageEndpoints(t *testing.T) {
 		"repo": "https://github.com/a81Biz/backroom",
 		"branch": "master",
 		"type": "compose",
-		"web_port": 80,
-		"api_port": 8000
+		"services": [
+			{"name": "frontend", "role": "web", "port": 80, "build_context": "./frontend", "dockerfile": "Dockerfile"},
+			{"name": "backend", "role": "api", "port": 8080, "build_context": "./backend", "dockerfile": "Dockerfile"}
+		]
 	}`)
 
 	req, _ := http.NewRequest("POST", "/api/deploy", bytes.NewReader(deployBody))

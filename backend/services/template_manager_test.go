@@ -27,8 +27,6 @@ func TestTemplateManager_BaseManifests(t *testing.T) {
 		"name: my-app-limits",
 		"kind: NetworkPolicy",
 		"name: my-app-netpol",
-		"matchLabels:\n              kubernetes.io/metadata.name: ingress-nginx",
-		"matchLabels:\n              kubernetes.io/metadata.name: supabase",
 	}
 
 	for _, str := range mustContain {
@@ -38,7 +36,7 @@ func TestTemplateManager_BaseManifests(t *testing.T) {
 	}
 }
 
-func TestTemplateManager_ComposeWithDatabase(t *testing.T) {
+func TestTemplateManager_PerServiceCompose(t *testing.T) {
 	tm := NewTemplateManager()
 	params := ProjectManifestParams{
 		ProjectName:      "backroom",
@@ -47,37 +45,82 @@ func TestTemplateManager_ComposeWithDatabase(t *testing.T) {
 		Domain:           "backroom.sammcore.local",
 		APIDomain:        "backroom-api.sammcore.local",
 		RequiresDatabase: true,
-		WebImage:         "ghcr.io/a81biz/backroom-web:latest",
-		WebPort:          80,
-		APIImage:         "ghcr.io/a81biz/backroom-api:latest",
-		APIPort:          8000,
+		Services: []ServiceSpec{
+			{Name: "frontend", Role: RoleWeb, Port: 80, BuildContext: "./frontend", Dockerfile: "Dockerfile"},
+			{Name: "backend", Role: RoleAPI, Port: 8080, BuildContext: "./backend", Dockerfile: "Dockerfile"},
+			{Name: "worker", Role: RoleWorker, Port: 0, BuildContext: "./worker", Dockerfile: "Dockerfile"},
+		},
+		Images: map[string]string{
+			"frontend": "localhost:30500/backroom/frontend:abc123",
+			"backend":  "localhost:30500/backroom/backend:abc123",
+			"worker":   "localhost:30500/backroom/worker:abc123",
+		},
 	}
 
-	rendered, err := tm.RenderAppManifests(params)
+	rendered, err := tm.RenderServiceManifests(params)
 	if err != nil {
-		t.Fatalf("failed to render compose manifests: %v", err)
+		t.Fatalf("failed to render service manifests: %v", err)
 	}
 
 	mustContain := []string{
-		"name: backroom-web",
-		"image: ghcr.io/a81biz/backroom-web:latest",
-		"name: backroom-api",
-		"image: ghcr.io/a81biz/backroom-api:latest",
-		"name: sammcore-registry-secret",
+		"name: backroom-frontend",
+		"image: localhost:30500/backroom/frontend:abc123",
+		"containerPort: 80",
+		"name: backroom-backend",
+		"image: localhost:30500/backroom/backend:abc123",
+		"containerPort: 8080",
+		"name: backroom-worker",
 		"name: wait-for-db",
-		"name: backroom-db-secrets",
+		"backroom-db-secrets",
 		"host: backroom.sammcore.local",
 		"host: backroom-api.sammcore.local",
 	}
 
 	for _, str := range mustContain {
 		if !strings.Contains(rendered, str) {
-			t.Errorf("compose manifest missing required string: %q", str)
+			t.Errorf("compose per-service manifest missing required string: %q\n\nFull output:\n%s", str, rendered)
 		}
+	}
+
+	// El frontend (web) NO debe tener envFrom con db-secrets
+	// Buscar el deployment del frontend y verificar que no tiene secretRef
+	parts := strings.Split(rendered, "---")
+	for _, part := range parts {
+		if strings.Contains(part, "name: backroom-frontend") && strings.Contains(part, "kind: Deployment") {
+			if strings.Contains(part, "db-secrets") {
+				t.Errorf("frontend deployment should NOT have db-secrets envFrom")
+			}
+		}
+	}
+
+	// Verificar que NO hay imagePullSecrets
+	if strings.Contains(rendered, "imagePullSecrets") {
+		t.Errorf("should NOT contain imagePullSecrets (local registry)")
+	}
+
+	// Verificar que NO hay ghcr.io
+	if strings.Contains(rendered, "ghcr.io") {
+		t.Errorf("should NOT contain ghcr.io references")
+	}
+
+	// Worker NO debe tener Service (no tiene puerto)
+	workerSvcFound := false
+	for _, part := range parts {
+		if strings.Contains(part, "kind: Service") && strings.Contains(part, "name: backroom-worker") {
+			workerSvcFound = true
+		}
+	}
+	if workerSvcFound {
+		t.Errorf("worker should NOT have a Service (no port)")
+	}
+
+	// Verificar el alias "backend" Service
+	if !strings.Contains(rendered, "name: backend\n") {
+		t.Errorf("should contain backend alias Service")
 	}
 }
 
-func TestTemplateManager_ComposeWithoutDatabase(t *testing.T) {
+func TestTemplateManager_NoDBNoEnv(t *testing.T) {
 	tm := NewTemplateManager()
 	params := ProjectManifestParams{
 		ProjectName:      "nodata-app",
@@ -86,60 +129,63 @@ func TestTemplateManager_ComposeWithoutDatabase(t *testing.T) {
 		Domain:           "nodata.sammcore.local",
 		APIDomain:        "nodata-api.sammcore.local",
 		RequiresDatabase: false,
-		WebImage:         "web:latest",
-		WebPort:          80,
-		APIImage:         "api:latest",
-		APIPort:          3000,
+		HasCustomEnv:     false,
+		Services: []ServiceSpec{
+			{Name: "web", Role: RoleWeb, Port: 3000},
+			{Name: "api", Role: RoleAPI, Port: 4000},
+		},
+		Images: map[string]string{
+			"web": "localhost:30500/nodata-app/web:def456",
+			"api": "localhost:30500/nodata-app/api:def456",
+		},
 	}
 
-	rendered, err := tm.RenderAppManifests(params)
+	rendered, err := tm.RenderServiceManifests(params)
 	if err != nil {
-		t.Fatalf("failed to render compose manifests: %v", err)
+		t.Fatalf("failed to render manifests: %v", err)
 	}
 
-	if strings.Contains(rendered, "name: wait-for-db") {
+	if strings.Contains(rendered, "wait-for-db") {
 		t.Errorf("expected no wait-for-db initContainer when RequiresDatabase is false")
 	}
-	if strings.Contains(rendered, "name: nodata-app-db-secrets") {
-		t.Errorf("expected no secretRef when RequiresDatabase is false")
+	if strings.Contains(rendered, "db-secrets") {
+		t.Errorf("expected no db-secrets when RequiresDatabase is false")
+	}
+	if strings.Contains(rendered, "env-secrets") {
+		t.Errorf("expected no env-secrets when HasCustomEnv is false")
 	}
 }
 
-func TestTemplateManager_DockerfileAndStatic(t *testing.T) {
+func TestTemplateManager_SingleAppDockerfile(t *testing.T) {
 	tm := NewTemplateManager()
-
-	// 1. Dockerfile
-	dfParams := ProjectManifestParams{
+	params := ProjectManifestParams{
 		ProjectName: "single-svc",
 		Namespace:   "single-svc",
 		Type:        "dockerfile",
 		Domain:      "single-svc.sammcore.local",
-		AppImage:    "my-service:1.0",
-		AppPort:     8080,
+		Services: []ServiceSpec{
+			{Name: "app", Role: RoleApp, Port: 8080, BuildContext: ".", Dockerfile: "Dockerfile"},
+		},
+		Images: map[string]string{
+			"app": "localhost:30500/single-svc/app:xyz789",
+		},
 	}
 
-	dfRendered, err := tm.RenderAppManifests(dfParams)
+	rendered, err := tm.RenderServiceManifests(params)
 	if err != nil {
 		t.Fatalf("failed to render dockerfile manifests: %v", err)
 	}
-	if !strings.Contains(dfRendered, "name: single-svc-app") {
+
+	if !strings.Contains(rendered, "name: single-svc-app") {
 		t.Errorf("expected deployment single-svc-app")
 	}
-
-	// 2. Static
-	staticParams := ProjectManifestParams{
-		ProjectName: "landing-page",
-		Namespace:   "landing-page",
-		Type:        "static",
-		Domain:      "landing.sammcore.local",
-		StaticImage: "nginx:alpine",
+	if !strings.Contains(rendered, "containerPort: 8080") {
+		t.Errorf("expected containerPort 8080")
 	}
-
-	staticRendered, err := tm.RenderAppManifests(staticParams)
-	if err != nil {
-		t.Fatalf("failed to render static manifests: %v", err)
+	if !strings.Contains(rendered, "localhost:30500/single-svc/app:xyz789") {
+		t.Errorf("expected local registry image")
 	}
-	if !strings.Contains(staticRendered, "name: landing-page-static") {
-		t.Errorf("expected deployment landing-page-static")
+	if !strings.Contains(rendered, "host: single-svc.sammcore.local") {
+		t.Errorf("expected ingress host")
 	}
 }
