@@ -86,7 +86,13 @@ func NewBuildManager(kubeClient kubernetes.Interface) *BuildManager {
 // imageExistsInRegistry comprueba si un tag de imagen ya existe en el registro local
 func (bm *BuildManager) imageExistsInRegistry(project, service, tag string) bool {
 	checkURL := fmt.Sprintf("http://%s/v2/%s/%s/manifests/%s", bm.registryURL, project, service, tag)
-	resp, err := http.Head(checkURL)
+	req, err := http.NewRequest(http.MethodHead, checkURL, nil)
+	if err != nil {
+		return false
+	}
+	req.Header.Set("Accept", "application/vnd.docker.distribution.manifest.v2+json, application/vnd.oci.image.manifest.v1+json")
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Do(req)
 	if err != nil {
 		return false
 	}

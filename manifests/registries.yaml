@@ -1,0 +1,7 @@
+mirrors:
+  "registry.sammcore-registry.svc.cluster.local:5000":
+    endpoint:
+      - "http://127.0.0.1:30500"
+  "localhost:30500":
+    endpoint:
+      - "http://127.0.0.1:30500"
