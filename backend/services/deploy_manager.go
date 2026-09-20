@@ -671,13 +671,15 @@ func (dm *DeployManager) ExecuteDeploy(ctx context.Context, p storage.Project, p
 		images, err := dm.buildManager.EnsureImages(ctx, p, params.Services, p.Commit)
 		if err != nil {
 			errMsg := fmt.Sprintf("fallo al construir imágenes: %v", err)
-			updateProjectProgress(&p, storage.StatusFailed, currentStep, totalSteps, "Error en compilación de imágenes", errMsg)
+			dm.RollbackDeployment(ctx, p, errMsg)
+			updateProjectProgress(&p, storage.StatusFailed, currentStep, totalSteps, "Rollback: fallo en compilación de imágenes", errMsg)
 			return fmt.Errorf(errMsg)
 		}
 
 		if len(images) == 0 {
 			errMsg := "no se generaron imágenes en el registro local para los servicios del proyecto"
-			updateProjectProgress(&p, storage.StatusFailed, currentStep, totalSteps, "Error: imágenes no generadas", errMsg)
+			dm.RollbackDeployment(ctx, p, errMsg)
+			updateProjectProgress(&p, storage.StatusFailed, currentStep, totalSteps, "Rollback: imágenes no generadas", errMsg)
 			return fmt.Errorf(errMsg)
 		}
 
@@ -694,13 +696,15 @@ func (dm *DeployManager) ExecuteDeploy(ctx context.Context, p storage.Project, p
 	manifestsYAML, err := dm.templateManager.RenderAllManifests(params)
 	if err != nil {
 		errMsg := fmt.Sprintf("error renderizando manifiestos: %v", err)
-		updateProjectProgress(&p, storage.StatusFailed, currentStep, totalSteps, "Error al renderizar manifiestos", errMsg)
+		dm.RollbackDeployment(ctx, p, errMsg)
+		updateProjectProgress(&p, storage.StatusFailed, currentStep, totalSteps, "Rollback: error al renderizar manifiestos", errMsg)
 		return fmt.Errorf(errMsg)
 	}
 
 	if err := dm.ApplyManifestsYAML(ctx, manifestsYAML); err != nil {
 		errMsg := fmt.Sprintf("error aplicando manifiestos en K8s: %v", err)
-		updateProjectProgress(&p, storage.StatusFailed, currentStep, totalSteps, "Error al aplicar manifiestos en K8s", errMsg)
+		dm.RollbackDeployment(ctx, p, errMsg)
+		updateProjectProgress(&p, storage.StatusFailed, currentStep, totalSteps, "Rollback: error al aplicar manifiestos en K8s", errMsg)
 		return fmt.Errorf(errMsg)
 	}
 	currentStep++
@@ -712,8 +716,57 @@ func (dm *DeployManager) ExecuteDeploy(ctx context.Context, p storage.Project, p
 	return nil
 }
 
+// RollbackDeployment elimina los recursos desplegados en K8s cuando ocurre un fallo o timeout,
+// evitando que queden pods zombis, CrashLoopBackOff o trabajos de Kaniko residuales.
+func (dm *DeployManager) RollbackDeployment(ctx context.Context, p storage.Project, reason string) {
+	log.Printf("[Rollback] 🧹 Ejecutando rollback para el proyecto %s (Razón: %s)...", p.Name, reason)
+
+	// 1. Limpiar cualquier Job residual de Kaniko en deployer-builds
+	jobs, err := dm.kubeClient.BatchV1().Jobs("deployer-builds").List(ctx, metav1.ListOptions{})
+	if err == nil {
+		bgPolicy := metav1.DeletePropagationBackground
+		prefix := fmt.Sprintf("build-%s-", p.Name)
+		for _, j := range jobs.Items {
+			if strings.HasPrefix(j.Name, prefix) {
+				log.Printf("[Rollback] Eliminando Job de Kaniko residual %s", j.Name)
+				_ = dm.kubeClient.BatchV1().Jobs("deployer-builds").Delete(ctx, j.Name, metav1.DeleteOptions{PropagationPolicy: &bgPolicy})
+			}
+		}
+	}
+
+	// 2. Eliminar Deployments en el namespace para detener pods inmediatamente
+	deps, err := dm.kubeClient.AppsV1().Deployments(p.Namespace).List(ctx, metav1.ListOptions{})
+	if err == nil {
+		fgPolicy := metav1.DeletePropagationForeground
+		for _, d := range deps.Items {
+			log.Printf("[Rollback] Eliminando Deployment fallido %s/%s", p.Namespace, d.Name)
+			_ = dm.kubeClient.AppsV1().Deployments(p.Namespace).Delete(ctx, d.Name, metav1.DeleteOptions{PropagationPolicy: &fgPolicy})
+		}
+	}
+
+	// 3. Eliminar Services del namespace
+	svcs, err := dm.kubeClient.CoreV1().Services(p.Namespace).List(ctx, metav1.ListOptions{})
+	if err == nil {
+		for _, s := range svcs.Items {
+			log.Printf("[Rollback] Eliminando Service %s/%s", p.Namespace, s.Name)
+			_ = dm.kubeClient.CoreV1().Services(p.Namespace).Delete(ctx, s.Name, metav1.DeleteOptions{})
+		}
+	}
+
+	// 4. Eliminar Ingress del namespace
+	ings, err := dm.kubeClient.NetworkingV1().Ingresses(p.Namespace).List(ctx, metav1.ListOptions{})
+	if err == nil {
+		for _, ing := range ings.Items {
+			log.Printf("[Rollback] Eliminando Ingress %s/%s", p.Namespace, ing.Name)
+			_ = dm.kubeClient.NetworkingV1().Ingresses(p.Namespace).Delete(ctx, ing.Name, metav1.DeleteOptions{})
+		}
+	}
+
+	log.Printf("[Rollback] ✅ Limpieza de rollback completada para %s", p.Name)
+}
+
 // monitorRollout verifica el estado de los Deployments hasta que todos estén listos.
-// Si excede el deadline, marca el proyecto como FAILED con el motivo detallado.
+// Si excede el deadline, ejecuta RollbackDeployment y marca el proyecto como FAILED con el motivo detallado.
 func (dm *DeployManager) monitorRollout(ctx context.Context, p storage.Project) {
 	desc := fmt.Sprintf("Paso %d/%d: Verificando disponibilidad (readiness) de pods en K3s...", p.TotalSteps, p.TotalSteps)
 	updateProjectProgress(&p, storage.StatusDeploying, p.TotalSteps, p.TotalSteps, desc, "")
@@ -743,7 +796,11 @@ func (dm *DeployManager) monitorRollout(ctx context.Context, p storage.Project) 
 	// TIMEOUT: recopilar motivos de fallo de los pods
 	failReason := dm.collectFailureReasons(ctx, p.Namespace)
 	errMsg := fmt.Sprintf("timeout esperando rollout (120s): %s", failReason)
-	updateProjectProgress(&p, storage.StatusFailed, p.TotalSteps, p.TotalSteps, "Despliegue fallido por timeout de pods", errMsg)
+	log.Printf("[Deploy] ⚠️ Proyecto %s: %s", p.Name, errMsg)
+
+	// Ejecutar rollback automático: eliminar deployments/pods rotos
+	dm.RollbackDeployment(ctx, p, errMsg)
+	updateProjectProgress(&p, storage.StatusFailed, p.TotalSteps, p.TotalSteps, "Rollback ejecutado: recursos limpiados tras fallo", errMsg)
 }
 
 // collectFailureReasons examina los pods del namespace y recopila los motivos de fallo
