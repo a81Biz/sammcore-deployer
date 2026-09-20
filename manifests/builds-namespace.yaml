@@ -47,12 +47,8 @@ spec:
     - Egress
   ingress: [] # No se admiten conexiones entrantes en el namespace de compilación
   egress:
-    # 1. DNS interno de Kubernetes (CoreDNS)
-    - to:
-        - namespaceSelector:
-            matchLabels:
-              kubernetes.io/metadata.name: kube-system
-      ports:
+    # 1. DNS (CoreDNS y servidores DNS upstream del clúster y host)
+    - ports:
         - protocol: UDP
           port: 53
         - protocol: TCP
