@@ -1,0 +1,59 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: deployer-frontend
+  namespace: deployer
+  labels:
+    app: deployer-frontend
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: deployer-frontend
+  template:
+    metadata:
+      labels:
+        app: deployer-frontend
+    spec:
+      containers:
+        - name: frontend
+          image: ghcr.io/a81biz/sammcore-deployer-frontend:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 80
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 80
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 80
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          resources:
+            requests:
+              cpu: 50m
+              memory: 32Mi
+            limits:
+              cpu: 250m
+              memory: 128Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: deployer-frontend
+  namespace: deployer
+  labels:
+    app: deployer-frontend
+spec:
+  type: ClusterIP
+  selector:
+    app: deployer-frontend
+  ports:
+    - name: http
+      port: 80
+      targetPort: 80

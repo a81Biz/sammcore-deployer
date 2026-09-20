@@ -1,95 +1,91 @@
 # 📄 Roadmap de Implementación – SAMMCORE Deployer
 
-Este documento define las fases de desarrollo de `sammcore-deployer`, desde un MVP mínimo hasta la integración completa en SAMMCORE.
+Este documento define la trayectoria evolutiva y el estado de avance de `sammcore-deployer`, desde los prototipos iniciales hasta la orquestación autónoma en el clúster SAMMCORE.
 
 ---
 
-## 🟢 Fase 1: MVP Backend + CLI
-🎯 Objetivo: contar con un backend funcional que pueda analizar repos y desplegar usando plantillas, sin frontend.
+## 🟢 Fase 1: MVP Backend + CLI (✅ Completada)
+🎯 Objetivo: backend funcional con capacidad de inspeccionar repositorios y detectar su naturaleza.
 
 ### Tareas
-- [ ] Inicializar `backend/` en Go.
-- [ ] Implementar módulo `RepoManager`:
-  - Clonar repositorios GitHub.
+- [x] Inicializar `backend/` en Go con dependencias Go modules.
+- [x] Implementar módulo `RepoManager`:
+  - Clonar repositorios GitHub (`go-git` / git nativo).
   - Detectar si contiene `docker-compose.yml`, `Dockerfile` o código estático.
-- [ ] Implementar módulo `TemplateManager`:
-  - Cargar templates desde `sammcore-templates`.
-  - Generar manifests en base a tipo de proyecto.
-- [ ] Implementar módulo `DeployManager`:
-  - Construir imagen Docker.
-  - Push a GHCR.
-  - Aplicar manifests en K3s (`kubectl` o `client-go`).
-- [ ] Crear CLI temporal (`main.go`) para pruebas locales.
+- [x] CLI de validación con salida JSON estructurada.
 
 ---
 
-## 🟡 Fase 2: Backend REST API
-🎯 Objetivo: exponer la lógica como API REST para interacción con el futuro frontend.
+## 🟢 Fase 2: Backend REST API (✅ Completada)
+🎯 Objetivo: exponer las capacidades de análisis e histórico a través de endpoints HTTP.
 
 ### Endpoints
-- [ ] `POST /analyzeRepo` → analiza repositorio y devuelve tipo.
-- [ ] `POST /createSecrets` → crea `Secrets` en Kubernetes.
-- [ ] `POST /deploy` → construye y despliega.
-- [ ] `GET /status/:projectName` → estado de pods, servicios y URL.
-- [ ] `DELETE /project/:projectName` → elimina namespace y recursos.
+- [x] `GET /health` → verificación de liveness y readiness del backend.
+- [x] `POST /analyzeRepo` → análisis en tiempo real de repo y branch con detección de tipo.
+- [x] `GET /history` → catálogo persistido de proyectos inspeccionados.
+- [x] `DELETE /history/:id` → limpieza de entradas en el historial.
 
 ---
 
-## 🟠 Fase 3: Frontend básico (React/Vite)
-🎯 Objetivo: crear una interfaz mínima para registrar proyectos y ver estado.
+## 🟢 Fase 3: Frontend React/Vite (✅ Completada)
+🎯 Objetivo: interfaz web intuitiva para interactuar con el orquestador.
 
 ### Tareas
-- [ ] Crear proyecto `frontend/` con Vite.
-- [ ] Pantalla **Registrar Proyecto**:
-  - Campos: nombre, repo URL, tipo, dominio.
-  - Botón “Analizar Repo”.
-- [ ] Pantalla **Estado de proyectos**:
-  - Tabla con nombre, URL, estado.
-  - Botones: “Logs”, “Redeploy”, “Eliminar”.
+- [x] Crear aplicación `frontend/` con Vite, React y TypeScript.
+- [x] Pantalla **Registrar Proyecto**: formulario de URL y rama con botón de análisis reactivo.
+- [x] Pantalla **Estado de Proyectos**: tabla dinámica con badges de estado y acciones.
+- [x] Enrutamiento SPA y cliente HTTP configurado con variables de entorno (`VITE_API_BASE`).
 
 ---
 
-## 🔵 Fase 4: Integración con K3s
-🎯 Objetivo: ejecutar despliegues reales en el clúster SAMMCORE.
+## 🟡 Fase 4: Orquestación K3s y Supabase Modelo A (🔄 En Progreso)
+🎯 Objetivo: ejecutar despliegues reales autónomos en el clúster SAMMCORE con base de datos horizontal y subdominios dinámicos.
+
+### Hitos de la Fase 4:
+- [ ] **Hito 4.1: DatabaseManager (Supabase Modelo A)**
+  - Conexión administrativa interna a `postgres.supabase.svc.cluster.local:5432`.
+  - Aprovisionamiento idempotente de `<proyecto>_db` y rol `<proyecto>_user`.
+  - Generación de contraseñas seguras en memoria y asignación estricta de permisos.
+  - Validación de visibilidad en **Supabase Studio** (`https://supabase.sammcore.local`).
+- [ ] **Hito 4.2: SecretManager**
+  - Generación de objetos `Secret` en Kubernetes directamente desde credenciales en memoria.
+  - Cero contraseñas en texto plano en Git o disco.
+  - Formato estandarizado de variables (`DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, `DB_PASSWORD`, `DATABASE_URL`).
+- [ ] **Hito 4.3: IngressManager y Subdominios Dinámicos**
+  - Configuración automática de reglas de Ingress en `ingress-nginx` (`NodePort: 30080`).
+  - Soporte para múltiples subdominios por proyecto (ej. `sitio.sammcore.local` para Frontend y `api.sitio.sammcore.local` para Backend API).
+  - Uso del certificado TLS comodín central (`sammcore-tls`).
+- [ ] **Hito 4.4: DeployManager & Endpoint `POST /deploy`**
+  - Ensamblado de manifiestos (`Namespace`, `Deployment`, `Service`, `Ingress`, `Secret`).
+  - Aplicación al clúster K3s usando `client-go`.
+  - Monitoreo del rollout y verificación del estado `Running`.
+- [ ] **Hito 4.5: Despliegue Piloto Backroom**
+  - Despliegue integral de `https://github.com/a81Biz/backroom`.
+  - Validación de endpoints:
+    - Web UI: `https://backroom.sammcore.local`
+    - API REST: `https://api.backroom.sammcore.local/products`
+    - Base de Datos: Tablas creadas e inspeccionables en Supabase Studio.
+
+---
+
+## 🟢 Fase 5: CI/CD y Auto-Despliegue del Deployer (✅ Completada)
+🎯 Objetivo: empaquetar y alojar el propio `sammcore-deployer` dentro del clúster K3s.
 
 ### Tareas
-- [ ] Montar `KUBECONFIG` dentro del contenedor del backend.
-- [ ] Probar despliegue de proyecto estático (ej. ElJuegoDLaVida).
-- [ ] Probar despliegue de proyecto multi-servicio (ej. PHPtest).
-- [ ] Confirmar creación de namespaces, Deployments, Services e Ingress.
-- [ ] Validar que Secrets funcionan correctamente.
+- [x] Dockerfile optimizado para `backend` (Go binario ligero) y `frontend` (NGINX estático).
+- [x] Manifiestos declarativos en `manifests/` (`backend.yaml`, `frontend.yaml`, `ingress.yaml`).
+- [x] Despliegue en `namespace: deployer` dentro de K3s.
+- [x] Exposición enrutada por Ingress en `https://deployer.sammcore.local`.
 
 ---
 
-## 🟣 Fase 5: CI/CD del Deployer
-🎯 Objetivo: automatizar despliegue del propio `sammcore-deployer`.
+## ⚪ Fase 6: Panel Avanzado y Observabilidad (Pendiente)
+🎯 Objetivo: herramientas avanzadas de administración, métricas y ciclo de vida.
 
 ### Tareas
-- [ ] Crear `Dockerfile` para backend y frontend.
-- [ ] Crear workflow `.github/workflows/deploy.yml`:
-  - Build → Push a GHCR.
-  - Aplicar manifests con `kubectl`.
-- [ ] Manifests `deployment.yaml`, `service.yaml`, `ingress.yaml` en `manifests/`.
-- [ ] Exponer en `https://deployer.sammcore.local`.
-
----
-
-## ⚫ Fase 6: Panel Avanzado
-🎯 Objetivo: extender funcionalidades para administración completa.
-
-### Mejoras
-- [ ] Logs en tiempo real desde pods.
-- [ ] Historial de despliegues por proyecto.
-- [ ] Gestión de Secrets desde UI.
-- [ ] Integración con repos privados (tokens SSH/https).
-- [ ] Autenticación de usuarios para el panel.
-
----
-
-## 📅 Prioridades
-1. MVP Backend (Go + CLI).
-2. API REST + Frontend básico.
-3. Integración con K3s y validación con ElJuegoDLaVida.
-4. Traducción de `docker-compose.yml` (PHPtest).
-5. CI/CD del propio deployer.
-6. Extensiones avanzadas de panel y seguridad.
+- [ ] Streaming de logs en vivo desde pods de K8s hacia la UI.
+- [ ] Dashboard de métricas en Grafana para despliegues (vía `/metrics` en el backend).
+- [ ] Opción en UI para desmantelar proyectos (`DELETE /project/:id`) con selector de:
+  - *Conservar base de datos para auditoría*.
+  - *Eliminar base de datos permanentemente*.
+- [ ] Autenticación de acceso al panel deployer.

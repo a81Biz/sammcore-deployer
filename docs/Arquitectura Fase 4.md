@@ -2,104 +2,131 @@
 
 ## 1. Rol del Deployer
 
-* **Orquestador central de despliegues.**
+* **Orquestador central de despliegues nativo en Kubernetes.**  
   Se encarga de:
+  1. Detectar y analizar repositorios de GitHub (push, webhook, release o solicitud manual desde la UI).
+  2. Aprovisionar automáticamente bases de datos dedicadas en el clúster central de Supabase (**Modelo A**).
+  3. Crear **Kubernetes Secrets** en memoria con las credenciales de conexión (cero contraseñas en texto plano en Git o disco).
+  4. Generar y aplicar manifiestos de Kubernetes (`Namespace`, `Deployment`, `Service`, `Ingress`, `Secret`).
+  5. Configurar el enrutamiento dinámico de subdominios (`sitio.sammcore.local`, `api.sitio.sammcore.local`) a través de `ingress-nginx`.
+  6. Registrar el histórico de despliegues y exponer métricas a Prometheus y Grafana.
 
-  1. Detectar cambios en GitHub (push, release, manual trigger).
-  2. Construir la imagen del proyecto (Docker o Compose).
-  3. Generar manifiestos Kubernetes (`Deployment`, `Service`, `Ingress`).
-  4. Aplicarlos en el clúster **K3s de SAMMCORE**.
-  5. Registrar el histórico de despliegues y exponer métricas.
-
-* Corre **como servicio independiente en el host SAMMCORE**, **no dentro del clúster K3s**, lo que permite:
-
-  * Mantener control incluso si el clúster se degrada.
-  * Integrarse directamente con Docker local y Portainer.
-  * Exportar métricas para Grafana/Prometheus.
+* **Ubicación en el clúster:**  
+  Corre como una **carga de trabajo de primera clase dentro del clúster K3s** (`namespace: deployer`), formando parte integral de la suite SAMMCORE junto con Supabase (`namespace: supabase`), Monitoreo (`namespace: monitoring`) y el Ingress Controller (`namespace: ingress-nginx`).
+  - Permite acceso nativo mediante red interna `cluster.local` sin exponer puertos administrativos al exterior.
+  - La comunicación con el API server de K8s se realiza de forma segura mediante RBAC / ServiceAccount / Kubeconfig interno.
+  - Se visualiza y administra desde el Kubernetes Dashboard y Grafana.
 
 ---
 
 ## 2. Relación con el ecosistema SAMMCORE
 
-* **Portainer:**
-  Visualiza los contenedores y despliegues gestionados por el Deployer.
-* **Grafana (con Prometheus):**
-  Consume métricas del Deployer (`/metrics`) y del clúster K3s.
-* **Kubernetes Dashboard:**
-  Muestra el detalle técnico de Deployments/Pods/Ingress generados.
-* **NGINX + DNS Local:**
-  Expone los proyectos desplegados bajo `*.sammcore.local` con certificados TLS.
+* **Supabase (`namespace: supabase`):**  
+  Plataforma central de datos PostgreSQL 15. El Deployer interactúa internamente vía `postgres.supabase.svc.cluster.local:5432` aprovisionando esquemas y usuarios por proyecto (Modelo A), administrables visualmente desde Supabase Studio (`https://supabase.sammcore.local`).
+* **Ingress-NGINX Controller (`namespace: ingress-nginx`):**  
+  Recibe el tráfico enrutado dinámicamente desde el NGINX del host (vía NodePort `30080` y wildcard `*.sammcore.local`). Cada nuevo Ingress creado por el deployer entra en funcionamiento de inmediato sin reiniciar servicios.
+* **Grafana & Prometheus (`namespace: monitoring`):**  
+  Prometheus recolecta métricas del Deployer (`/metrics`), del clúster K3s y de las bases de datos de Supabase vía `postgres-exporter`.
+* **Portainer & Kubernetes Dashboard:**  
+  Permiten inspeccionar el estado de los pods, servicios y volúmenes de cada proyecto desplegado.
 
 ---
 
 ## 3. Diagrama de arquitectura
 
 ```mermaid
-flowchart LR
-    subgraph GH[GitHub]
-      R1[Repositorios\nProyectos]
+flowchart TD
+    subgraph LAN["Red Local (LAN)"]
+        User["💻 Desarrollador / Usuario"]
+        Wildcard["🌐 Host NGINX (*.sammcore.local:443)\nProxy inverso Wildcard SSL"]
     end
 
-    subgraph SC[SAMMCORE Host]
-      D1[SAMMCORE-Deployer\n(Servicio independiente)]
-      P1[Portainer]
-      G1[Grafana]
-      N1[NGINX\nProxy HTTPS]
+    subgraph K3s["☸️ Clúster K3s SAMMCORE"]
+        subgraph IngressLayer["Enrutamiento Dinámico"]
+            IC["Ingress-NGINX Controller\n(NodePort: 30080)"]
+        end
+
+        subgraph DeployerNS["namespace: deployer"]
+            Frontend["deployer-frontend\n(React/Vite)"]
+            Backend["deployer-backend\n(Go API: 8080)"]
+        end
+
+        subgraph SupabaseNS["namespace: supabase (Modelo A)"]
+            PG["🐘 PostgreSQL 15 Engine\n(Almacenamiento NVMe)"]
+            Studio["🖥️ Supabase Studio\n(supabase.sammcore.local)"]
+            Exporter["📊 Postgres-Exporter\n(Métricas DB)"]
+        end
+
+        subgraph ProjectNS["namespace: <proyecto> (ej. backroom)"]
+            AppUI["🌐 Web / Frontend Pod"]
+            AppAPI["⚙️ Backend API Pod"]
+            Sec["🔐 Secret (<proyecto>-db-secrets)"]
+        end
+
+        subgraph MonitoringNS["namespace: monitoring"]
+            Prom["📈 Prometheus TSDB"]
+            Graf["📊 Grafana Dashboards"]
+        end
     end
 
-    subgraph K3s[K3s Cluster]
-      A1[API Server]
-      K1[Deployments]
-      K2[Services]
-      K3[Ingress]
-      K4[Pods]
-      KD[Kubernetes Dashboard]
-    end
+    User -->|https://deployer.sammcore.local| Wildcard
+    User -->|https://<proyecto>.sammcore.local| Wildcard
+    User -->|https://api.<proyecto>.sammcore.local| Wildcard
 
-    R1 -->|push/release| D1
-    D1 -->|kubectl/client-go| A1
-    A1 --> K1 & K2 & K3 & K4
-    KD --> A1
+    Wildcard -->|SNI *.sammcore.local| IC
+    IC --> Frontend
+    IC --> Backend
+    IC --> AppUI
+    IC --> AppAPI
 
-    D1 -->|estado contenedores| P1
-    D1 -->|/metrics Prometheus| G1
-    G1 -->|dashboards| D1
+    Frontend -->|REST API| Backend
+    Backend -->|1. Aprovisiona DB & Rol| PG
+    Backend -->|2. Inyecta Secret| Sec
+    Backend -->|3. Aplica Manifests| ProjectNS
+    Sec -.->|Variables de entorno DB| AppAPI
+    AppAPI -->|Queries SQL seguras| PG
 
-    K3s --> N1 -->|DNS *.sammcore.local| Users[Usuarios LAN]
+    Exporter -->|Scrape métricas| PG
+    Prom -->|Recolecta| Exporter
+    Prom -->|Recolecta| Backend
+    Graf -->|Visualiza| Prom
 ```
 
 ---
 
-## 4. Flujo de trabajo
+## 4. Flujo de trabajo integral
 
-1. **Evento en GitHub:** nuevo código o release.
-2. **SAMMCORE-Deployer:**
-
-   * Construye imagen → publica en registro (o local).
-   * Genera manifiestos según tipo de proyecto.
-   * Aplica los manifiestos en K3s.
-   * Registra acción en `history.json`.
-   * Expone métricas de éxito/error.
-3. **K3s:** despliega recursos (Pods, Services, Ingress).
-4. **NGINX:** enruta tráfico interno con TLS + DNS local.
-5. **Portainer:** refleja estado de contenedores/servicios.
-6. **Grafana:** muestra métricas y alertas de despliegue.
-7. **Usuarios LAN:** acceden a apps con `https://proyecto.sammcore.local`.
+1. **Registro / Trigger:** El desarrollador ingresa a `https://deployer.sammcore.local`, proporciona el repositorio (ej. `https://github.com/a81Biz/backroom`) y selecciona la rama.
+2. **Análisis (`POST /analyzeRepo`):**
+   - El backend clona el repo en memoria/espacio temporal.
+   - Detecta la naturaleza del proyecto (`compose`, `dockerfile`, `static`).
+   - Identifica si requiere base de datos y puertos de frontend/backend.
+3. **Aprovisionamiento de Base de Datos (Supabase Modelo A):**
+   - `DatabaseManager` se conecta a PostgreSQL central.
+   - Crea de forma idempotente `<proyecto>_db` y el usuario `<proyecto>_user` con contraseña criptográfica.
+   - Restringe permisos para aislamiento absoluto.
+4. **Gestión de Secretos en Memoria:**
+   - `SecretManager` toma las credenciales generadas y crea el objeto `Secret` en Kubernetes (`<proyecto>-db-secrets`).
+   - Ninguna credencial se escribe en disco ni se versiona en Git.
+5. **Generación de Manifiestos y Subdominios:**
+   - `TemplateManager` ensambla los recursos de K8s:
+     - `Namespace: <proyecto>`
+     - `Deployments` para cada servicio.
+     - `Services` de tipo `ClusterIP`.
+     - `Ingress` asociando:
+       - `<proyecto>.sammcore.local` -> Servicio Web
+       - `api.<proyecto>.sammcore.local` -> Servicio API Backend
+6. **Aplicación en Clúster (`client-go`):**
+   - `DeployManager` aplica los manifiestos al clúster K3s.
+7. **Monitoreo y Verificación:**
+   - Pods inician y consumen el `Secret` de BD.
+   - La nueva base aparece en Supabase Studio.
+   - Métricas de tráfico y conexiones se reflejan en Prometheus y Grafana.
 
 ---
 
-## 5. Integraciones clave
+## 5. Seguridad y Gobernanza
 
-* **Prometheus exporter en el Deployer:**
-  Endpoint `/metrics` → número de despliegues, errores, estado de pods, duración de build/deploy.
-* **Portainer API:**
-  Opcional para correlacionar contenedores locales con despliegues en K3s.
-* **K3s API (client-go):**
-  Para aplicar manifiestos y consultar estado real.
-* **NGINX Ingress:**
-  Publicación final con certificados autofirmados instalados en la red local.
-
----
-
-📌 Con este documento dejamos clara la **posición del Deployer en la arquitectura SAMMCORE**: no es un “servicio oculto” del clúster, sino una **pieza lateral y estratégica**, integrándose de frente con Grafana, Portainer y Dashboard.
-
+* **Cero Contraseñas en Texto Plano:** Todo parámetro sensible reside únicamente en Kubernetes Secrets inyectados como variables de entorno.
+* **Aislamiento Multi-Tenant:** Cada proyecto posee su propio `Namespace` de K8s y su propia base y usuario en PostgreSQL.
+* **Enrutamiento Dinámico Total:** La adición o eliminación de proyectos no requiere modificar el NGINX del host físico ni reiniciar servicios.
