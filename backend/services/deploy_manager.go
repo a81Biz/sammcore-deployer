@@ -338,6 +338,9 @@ func (dm *DeployManager) ExecuteDeploy(ctx context.Context, p storage.Project, p
 		return fmt.Errorf("error aplicando manifiestos en K8s: %w", err)
 	}
 
+	// Propagar sammcore-registry-secret si está presente en el namespace deployer
+	_ = dm.secretManager.EnsureRegistrySecret(ctx, namespace)
+
 	// 3. Monitorear despliegue (hasta 30s)
 	go dm.monitorRollout(context.Background(), p)
 

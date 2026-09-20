@@ -127,3 +127,32 @@ func (sm *SecretManager) DeleteDBSecret(ctx context.Context, namespace, projectN
 	}
 	return nil
 }
+
+// EnsureRegistrySecret copia sammcore-registry-secret al namespace del proyecto si existe en el namespace deployer
+func (sm *SecretManager) EnsureRegistrySecret(ctx context.Context, targetNamespace string) error {
+	srcSecret, err := sm.client.CoreV1().Secrets("deployer").Get(ctx, "sammcore-registry-secret", metav1.GetOptions{})
+	if err != nil {
+		if errors.IsNotFound(err) {
+			return nil // No es obligatorio si las imágenes son públicas o locales
+		}
+		return err
+	}
+
+	targetSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "sammcore-registry-secret",
+			Namespace: targetNamespace,
+			Labels: map[string]string{
+				"app.kubernetes.io/managed-by": "sammcore-deployer",
+			},
+		},
+		Type: srcSecret.Type,
+		Data: srcSecret.Data,
+	}
+
+	_, err = sm.client.CoreV1().Secrets(targetNamespace).Create(ctx, targetSecret, metav1.CreateOptions{})
+	if err != nil && !errors.IsAlreadyExists(err) {
+		return fmt.Errorf("error asegurando registry secret en %s: %w", targetNamespace, err)
+	}
+	return nil
+}

@@ -132,7 +132,7 @@ spec:
       containers:
         - name: web
           image: {{ .WebImage }}
-          imagePullPolicy: Always
+          imagePullPolicy: IfNotPresent
           ports:
             - name: http
               containerPort: {{ .WebPort }}
@@ -202,7 +202,7 @@ spec:
       containers:
         - name: api
           image: {{ .APIImage }}
-          imagePullPolicy: Always
+          imagePullPolicy: IfNotPresent
           ports:
             - name: http
               containerPort: {{ .APIPort }}
@@ -233,6 +233,20 @@ apiVersion: v1
 kind: Service
 metadata:
   name: {{ .ProjectName }}-api
+  namespace: {{ .Namespace }}
+spec:
+  type: ClusterIP
+  selector:
+    app: {{ .ProjectName }}-api
+  ports:
+    - name: http
+      port: {{ .APIPort }}
+      targetPort: {{ .APIPort }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: backend
   namespace: {{ .Namespace }}
 spec:
   type: ClusterIP
@@ -311,7 +325,7 @@ spec:
       containers:
         - name: app
           image: {{ .AppImage }}
-          imagePullPolicy: Always
+          imagePullPolicy: IfNotPresent
           ports:
             - name: http
               containerPort: {{ .AppPort }}
@@ -388,7 +402,7 @@ spec:
       containers:
         - name: nginx
           image: {{ .StaticImage }}
-          imagePullPolicy: Always
+          imagePullPolicy: IfNotPresent
           ports:
             - name: http
               containerPort: 80

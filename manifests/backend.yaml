@@ -21,7 +21,7 @@ spec:
       containers:
         - name: backend
           image: ghcr.io/a81biz/sammcore-deployer-backend:latest
-          imagePullPolicy: Always # Siempre descargar la versión más reciente en re-despliegues
+          imagePullPolicy: IfNotPresent
           ports:
             - name: http
               containerPort: 8080

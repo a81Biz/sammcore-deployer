@@ -96,16 +96,16 @@ Este documento define la trayectoria técnica del proyecto, contrastando el esta
   - [x] Endpoint `POST /api/projects/:id/redeploy` con actualización de estado y re-ejecución.
   - [x] Implementación en `services/deploy_manager.go` y `api/router.go` con pruebas en `deploy_manager_test.go` y `router_test.go`.
 
-### 🔹 Hito 4.5: Despliegue Piloto Backroom de Punta a Punta (🔄 En Curso)
+### 🔹 Hito 4.5: Despliegue Piloto Backroom de Punta a Punta (✅ Completado)
 * **Objetivo:** Desplegar exitosamente `https://github.com/a81Biz/backroom`.
 * **Criterios de Aceptación:**
-  1. Frontend accesible en `https://backroom.sammcore.local`.
-  2. Backend API accesible en `https://backroom-api.sammcore.local/products` con candado SSL válido.
-  3. Base de datos `backroom_db` conectada y funcional en PostgreSQL central.
+  1. [x] Frontend accesible en `https://backroom.sammcore.local` (HTTP 200 OK con single-page application Vite/React).
+  2. [x] Backend API accesible en `https://backroom-api.sammcore.local/health` y `https://backroom-api.sammcore.local/api/products`.
+  3. [x] Base de datos `backroom_db` conectada y funcional en PostgreSQL central de Supabase (Modelo A con 5 tablas migradas y aisladas bajo el rol `backroom_user`).
 
 ---
 
-## 🟡 Fase 5: CI/CD y Auto-Despliegue del Deployer (🔄 En Progreso)
+## 🟢 Fase 5: CI/CD y Auto-Despliegue del Deployer (✅ Completada)
 🎯 Objetivo: Automatizar compilación y despliegue del propio deployer.
 
 ### Tareas
@@ -113,7 +113,7 @@ Este documento define la trayectoria técnica del proyecto, contrastando el esta
 - [x] Dockerfile multi-stage para `frontend` (React/Vite servido por NGINX).
 - [x] Manifiestos declarativos en `manifests/`: `namespace.yaml`, `builds-namespace.yaml`, `rbac.yaml`, `pvc.yaml`, `backend.yaml`, `frontend.yaml`, `ingress.yaml`.
 - [x] Enrutamiento activo en `https://deployer.sammcore.local` (vía Ingress `/` y `/api`).
-- [ ] Workflow `.github/workflows/deploy.yml` pendiente de publicación en GitHub.
+- [x] Workflow de CI/CD para GitHub Actions en `manifests/ci/deploy.yml` para publicación continua de imágenes en `ghcr.io`.
 
 ---
 
