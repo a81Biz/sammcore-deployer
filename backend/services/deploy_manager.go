@@ -3,6 +3,7 @@ package services
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -248,6 +249,140 @@ func (dm *DeployManager) GetPodLogs(ctx context.Context, namespace string, tailL
 	}
 
 	return buf.String(), nil
+}
+
+type ContainerMetricInfo struct {
+	Name        string `json:"name"`
+	CPUUsage    string `json:"cpu_usage"`
+	MemoryUsage string `json:"memory_usage"`
+}
+
+type PodMetricInfo struct {
+	Name        string                `json:"name"`
+	Status      string                `json:"status"`
+	Ready       bool                  `json:"ready"`
+	Restarts    int32                 `json:"restarts"`
+	CPUUsage    string                `json:"cpu_usage"`
+	MemoryUsage string                `json:"memory_usage"`
+	Containers  []ContainerMetricInfo `json:"containers,omitempty"`
+}
+
+type ProjectMetrics struct {
+	ProjectID   string            `json:"project_id"`
+	ProjectName string            `json:"project_name"`
+	Namespace   string            `json:"namespace"`
+	Status      string            `json:"status"`
+	PodsCount   int               `json:"pods_count"`
+	Pods        []PodMetricInfo   `json:"pods"`
+	QuotaUsage  map[string]string `json:"quota_usage,omitempty"`
+	QuotaLimits map[string]string `json:"quota_limits,omitempty"`
+}
+
+// GetProjectMetrics consulta dinámicamente el estado y recursos de los pods de un proyecto en K8s
+func (dm *DeployManager) GetProjectMetrics(ctx context.Context, p storage.Project) (*ProjectMetrics, error) {
+	metrics := &ProjectMetrics{
+		ProjectID:   p.ID,
+		ProjectName: p.Name,
+		Namespace:   p.Namespace,
+		Status:      string(p.Status),
+		Pods:        make([]PodMetricInfo, 0),
+		QuotaUsage:  make(map[string]string),
+		QuotaLimits: make(map[string]string),
+	}
+
+	// 1. Obtener Pods del namespace
+	pods, err := dm.kubeClient.CoreV1().Pods(p.Namespace).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("error listando pods en %s: %w", p.Namespace, err)
+	}
+
+	metrics.PodsCount = len(pods.Items)
+
+	// 2. Intentar consultar métricas crudas de metrics-server
+	type rawMetricList struct {
+		Items []struct {
+			Metadata struct {
+				Name string `json:"name"`
+			} `json:"metadata"`
+			Containers []struct {
+				Name  string `json:"name"`
+				Usage struct {
+					CPU    string `json:"cpu"`
+					Memory string `json:"memory"`
+				} `json:"usage"`
+			} `json:"containers"`
+		} `json:"items"`
+	}
+
+	rawMetricsMap := make(map[string]map[string]ContainerMetricInfo)
+	if dm.kubeClient.Discovery() != nil && dm.kubeClient.Discovery().RESTClient() != nil {
+		rawBytes, errRaw := dm.kubeClient.Discovery().RESTClient().Get().AbsPath("/apis/metrics.k8s.io/v1beta1/namespaces/" + p.Namespace + "/pods").DoRaw(ctx)
+		if errRaw == nil && len(rawBytes) > 0 {
+			var rml rawMetricList
+			if json.Unmarshal(rawBytes, &rml) == nil {
+				for _, item := range rml.Items {
+					cmMap := make(map[string]ContainerMetricInfo)
+					for _, c := range item.Containers {
+						cmMap[c.Name] = ContainerMetricInfo{
+							Name:        c.Name,
+							CPUUsage:    c.Usage.CPU,
+							MemoryUsage: c.Usage.Memory,
+						}
+					}
+					rawMetricsMap[item.Metadata.Name] = cmMap
+				}
+			}
+		}
+	}
+
+	// 3. Ensamblar información por cada pod
+	for _, pod := range pods.Items {
+		var totalRestarts int32
+		allReady := true
+		for _, cs := range pod.Status.ContainerStatuses {
+			totalRestarts += cs.RestartCount
+			if !cs.Ready {
+				allReady = false
+			}
+		}
+
+		podInfo := PodMetricInfo{
+			Name:       pod.Name,
+			Status:     string(pod.Status.Phase),
+			Ready:      allReady && len(pod.Status.ContainerStatuses) > 0,
+			Restarts:   totalRestarts,
+			Containers: make([]ContainerMetricInfo, 0),
+		}
+
+		if cMap, exists := rawMetricsMap[pod.Name]; exists {
+			for _, cMetric := range cMap {
+				podInfo.Containers = append(podInfo.Containers, cMetric)
+				if podInfo.CPUUsage == "" {
+					podInfo.CPUUsage = cMetric.CPUUsage
+					podInfo.MemoryUsage = cMetric.MemoryUsage
+				}
+			}
+		} else {
+			podInfo.CPUUsage = "0m"
+			podInfo.MemoryUsage = "0Mi"
+		}
+
+		metrics.Pods = append(metrics.Pods, podInfo)
+	}
+
+	// 4. Consultar ResourceQuota
+	quotas, errQ := dm.kubeClient.CoreV1().ResourceQuotas(p.Namespace).List(ctx, metav1.ListOptions{})
+	if errQ == nil && len(quotas.Items) > 0 {
+		q := quotas.Items[0]
+		for k, v := range q.Status.Used {
+			metrics.QuotaUsage[string(k)] = v.String()
+		}
+		for k, v := range q.Status.Hard {
+			metrics.QuotaLimits[string(k)] = v.String()
+		}
+	}
+
+	return metrics, nil
 }
 
 // DeleteProjectDeployment desmantela el namespace y condicionalmente la BD en Postgres central

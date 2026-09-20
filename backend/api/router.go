@@ -202,6 +202,31 @@ func logsHandler(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func projectMetricsHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	id := mux.Vars(r)["id"]
+
+	p, err := storage.GetProject(id)
+	if err != nil {
+		writeJSONError(w, http.StatusNotFound, "Proyecto no encontrado", "PROJECT_NOT_FOUND")
+		return
+	}
+
+	dm := getDeployManager()
+	if dm == nil {
+		writeJSONError(w, http.StatusServiceUnavailable, "Gestor de despliegue no inicializado", "DEPLOYER_UNAVAILABLE")
+		return
+	}
+
+	metrics, err := dm.GetProjectMetrics(r.Context(), *p)
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, err.Error(), "METRICS_ERROR")
+		return
+	}
+
+	_ = json.NewEncoder(w).Encode(metrics)
+}
+
 func redeployHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	id := mux.Vars(r)["id"]
@@ -390,6 +415,7 @@ func NewRouter() http.Handler {
 
 	// Rutas Públicas de Diagnóstico y Métricas
 	r.Handle("/metrics", promhttp.Handler())
+	r.Handle("/api/metrics", promhttp.Handler())
 	r.HandleFunc("/health", healthHandler).Methods("GET")
 	r.HandleFunc("/api/health", healthHandler).Methods("GET")
 
@@ -403,6 +429,7 @@ func NewRouter() http.Handler {
 	apiRouter.HandleFunc("/projects/{id}", getProjectHandler).Methods("GET")
 	apiRouter.HandleFunc("/projects/{id}", deleteProjectHandler).Methods("DELETE")
 	apiRouter.HandleFunc("/projects/{id}/logs", logsHandler).Methods("GET")
+	apiRouter.HandleFunc("/projects/{id}/metrics", projectMetricsHandler).Methods("GET")
 	apiRouter.HandleFunc("/projects/{id}/redeploy", redeployHandler).Methods("POST")
 
 	return enableCORS(r)

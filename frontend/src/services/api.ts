@@ -90,3 +90,13 @@ export async function deleteProject(id: string, deleteDB: boolean = false) {
   }
   return data;
 }
+
+export async function getProjectMetrics(id: string) {
+  const res = await authFetch(`/projects/${id}/metrics`);
+  const data = await res.json().catch(() => ({ error: "Error al obtener métricas" }));
+  if (!res.ok) {
+    throw new Error(data.error || `Error ${res.status}`);
+  }
+  return data;
+}
+

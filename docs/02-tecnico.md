@@ -88,12 +88,14 @@ Todos los endpoints mutables requieren el header `Authorization: Bearer <DEPLOYE
 | Método | Endpoint | Código Éxito | Descripción |
 | :--- | :--- | :--- | :--- |
 | `GET` | `/api/health` | `200 OK` | Liveness y readiness probe (Público) |
-| `GET` | `/metrics` | `200 OK` | Métricas Prometheus (Público) |
+| `GET` | `/metrics` | `200 OK` | Métricas Prometheus del Deployer (Público) |
+| `GET` | `/api/metrics` | `200 OK` | Alias de métricas Prometheus del Deployer (Público) |
 | `POST` | `/api/analyzeRepo` | `200 OK` | Clona e inspecciona repositorio de forma determinista (Read-Only) |
 | `POST` | `/api/deploy` | `202 Accepted` | Inicia despliegue asíncrono en K3s (Hito 4.4) |
 | `GET` | `/api/projects` | `200 OK` | Catálogo de proyectos registrados |
 | `GET` | `/api/projects/:id` | `200 OK` | Estado en vivo de pods, servicios y rollout |
-| `GET` | `/api/projects/:id/logs` | `200 OK` | Logs recientes del pod principal (501 en Hito 4.0) |
+| `GET` | `/api/projects/:id/logs` | `200 OK` | Logs recientes del pod principal (Hito 4.5) |
+| `GET` | `/api/projects/:id/metrics` | `200 OK` | Métricas dinámicas de infraestructura (Pods, CPU, Memoria, Quota) |
 | `POST` | `/api/projects/:id/redeploy` | `202 Accepted` | Reinicia o re-aplica el despliegue |
 | `DELETE` | `/api/projects/:id` | `200 OK` | Destruye namespace y condicionalmente la BD (`?delete_db=true`) |
 

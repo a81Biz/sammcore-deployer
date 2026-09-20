@@ -117,10 +117,15 @@ Este documento define la trayectoria técnica del proyecto, contrastando el esta
 
 ---
 
-## ⚪ Fase 6: Panel Avanzado y Observabilidad (Pendiente)
+## 🟡 Fase 6: Panel Avanzado y Observabilidad (🔄 En Desarrollo)
 🎯 Objetivo: Herramientas de administración avanzada y ciclo de vida.
 
 ### Tareas
-- [ ] Streaming de logs en vivo desde pods hacia la UI (`GET /api/projects/:id/logs`).
+- [x] Endpoint dinámico de métricas de infraestructura por proyecto (`GET /api/projects/:id/metrics`) consultando directamente K8s metrics-server y ResourceQuotas.
+- [x] Visualización interactiva de consumo de CPU, RAM, estado de pods y cuotas en la UI del Deployer (`EstadoProyectos.tsx`).
+- [x] Endpoint `/api/metrics` para exportación Prometheus del propio Deployer.
+- [x] Integración de portales de observabilidad del clúster (Supabase Studio, Kubernetes Dashboard, Grafana, Prometheus).
+- [ ] Streaming continuo por WebSockets de logs desde pods hacia la UI (`GET /api/projects/:id/logs`).
 - [ ] Dashboard dedicado en Grafana con métricas exportadas por `/metrics`.
-- [ ] Eliminación selectiva en UI (`DELETE /api/projects/:id?delete_db=true|false`).
+- [x] Eliminación selectiva en UI (`DELETE /api/projects/:id?delete_db=true|false`) con confirmación de base de datos.
+
