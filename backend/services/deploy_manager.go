@@ -453,6 +453,7 @@ func (dm *DeployManager) ExecuteDeploy(ctx context.Context, p storage.Project, p
 					return fmt.Errorf("fallo al crear DB secret: %w", err)
 				}
 			}
+		}
 	}
 
 	// Si hay variables de entorno personalizadas, asegurar namespace y secreto
