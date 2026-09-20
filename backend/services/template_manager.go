@@ -208,15 +208,16 @@ spec:
           ports:
             - name: http
               containerPort: {{ .APIPort }}
-          {{- if .RequiresDatabase }}
+          {{- if or .RequiresDatabase .HasCustomEnv }}
           envFrom:
+            {{- if .RequiresDatabase }}
             - secretRef:
                 name: {{ .ProjectName }}-db-secrets
-          {{- end }}
-          {{- if .HasCustomEnv }}
-          envFrom:
+            {{- end }}
+            {{- if .HasCustomEnv }}
             - secretRef:
                 name: {{ .ProjectName }}-env-secrets
+            {{- end }}
           {{- end }}
           readinessProbe:
             tcpSocket:
@@ -336,15 +337,16 @@ spec:
           ports:
             - name: http
               containerPort: {{ .AppPort }}
-          {{- if .RequiresDatabase }}
+          {{- if or .RequiresDatabase .HasCustomEnv }}
           envFrom:
+            {{- if .RequiresDatabase }}
             - secretRef:
                 name: {{ .ProjectName }}-db-secrets
-          {{- end }}
-          {{- if .HasCustomEnv }}
-          envFrom:
+            {{- end }}
+            {{- if .HasCustomEnv }}
             - secretRef:
                 name: {{ .ProjectName }}-env-secrets
+            {{- end }}
           {{- end }}
           readinessProbe:
             tcpSocket:

@@ -426,6 +426,14 @@ func (dm *DeployManager) ExecuteDeploy(ctx context.Context, p storage.Project, p
 				log.Printf("[Deploy] Error conectando a Supabase DB: %v", err)
 			} else {
 				existingPass, _ := dm.secretManager.GetExistingDBPassword(ctx, namespace, projectName)
+				if existingPass == "" && params.BuildArgs != nil {
+					for _, k := range []string{"DB_PASSWORD", "POSTGRES_PASSWORD", "DATABASE_PASSWORD", "DB_PASS"} {
+						if p, ok := params.BuildArgs[k]; ok && strings.TrimSpace(p) != "" {
+							existingPass = strings.TrimSpace(p)
+							break
+						}
+					}
+				}
 				provRes, err := ProvisionProjectDatabase(masterDB, projectName, existingPass)
 				_ = masterDB.Close()
 				if err != nil {
