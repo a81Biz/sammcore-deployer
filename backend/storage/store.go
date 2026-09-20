@@ -2,32 +2,60 @@ package storage
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
+	"path/filepath"
 	"sync"
 	"time"
 )
 
+type ProjectStatus string
+
+const (
+	StatusAnalyzed     ProjectStatus = "analyzed"
+	StatusProvisioning ProjectStatus = "provisioning_db"
+	StatusBuilding     ProjectStatus = "building_image"
+	StatusDeploying    ProjectStatus = "deploying_k8s"
+	StatusRunning      ProjectStatus = "running"
+	StatusFailed       ProjectStatus = "failed"
+)
+
 type Project struct {
-	ID        string    `json:"id"`
-	Repo      string    `json:"repo"`
-	Branch    string    `json:"branch"`
-	Type      string    `json:"type"`
-	Status    string    `json:"status"`
-	Timestamp time.Time `json:"timestamp"`
+	ID               string        `json:"id"`
+	Name             string        `json:"name"`
+	Repo             string        `json:"repo"`
+	Branch           string        `json:"branch"`
+	Type             string        `json:"type"`
+	Namespace        string        `json:"namespace"`
+	Domain           string        `json:"domain"`
+	APIDomain        string        `json:"api_domain,omitempty"`
+	RequiresDatabase bool          `json:"requires_database"`
+	Status           ProjectStatus `json:"status"`
+	CreatedAt        time.Time     `json:"created_at"`
+	UpdatedAt        time.Time     `json:"updated_at"`
 }
 
 var mu sync.Mutex
-var historyFile = "history.json"
+
+func getHistoryFile() string {
+	dir := os.Getenv("DATA_DIR")
+	if dir == "" {
+		dir = "."
+	}
+	_ = os.MkdirAll(dir, 0755)
+	return filepath.Join(dir, "history.json")
+}
 
 func LoadProjects() ([]Project, error) {
 	mu.Lock()
 	defer mu.Unlock()
 
-	if _, err := os.Stat(historyFile); os.IsNotExist(err) {
+	filePath := getHistoryFile()
+	if _, err := os.Stat(filePath); os.IsNotExist(err) {
 		return []Project{}, nil
 	}
 
-	data, err := os.ReadFile(historyFile)
+	data, err := os.ReadFile(filePath)
 	if err != nil {
 		return nil, err
 	}
@@ -49,13 +77,23 @@ func SaveProjects(projects []Project) error {
 		return err
 	}
 
-	return os.WriteFile(historyFile, data, 0644)
+	return os.WriteFile(getHistoryFile(), data, 0644)
 }
 
 func AddProject(p Project) error {
 	projects, _ := LoadProjects()
 	projects = append(projects, p)
 	return SaveProjects(projects)
+}
+
+func GetProject(id string) (*Project, error) {
+	projects, _ := LoadProjects()
+	for _, p := range projects {
+		if p.ID == id {
+			return &p, nil
+		}
+	}
+	return nil, errors.New("proyecto no encontrado")
 }
 
 func DeleteProject(id string) error {

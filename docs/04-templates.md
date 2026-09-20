@@ -16,7 +16,7 @@ Cuando un repositorio contiene `docker-compose.yml`, el módulo `TemplateManager
    - **Servicio Web / Frontend:** Aquel que expone puertos estándar de interfaz (`80`, `3000`, `5173`, `8080`) o utiliza servidores web como NGINX o scripts de Vite. Se le asigna Ingress en `https://{{ .projectName }}.sammcore.local`.
    - **Servicio API / Backend:** Aquel que expone puertos de servicio (`8000`, `5000`, `8080`) o corre runtimes de backend (Go, Python/FastAPI, Node/Express). Se le asigna Ingress en `https://api.{{ .projectName }}.sammcore.local`.
 3. **Manejo de `VITE_API_BASE` en Frontend:**
-   - Como Vite hornea las variables `VITE_*` durante el comando `build`, la URL pública de la API (`https://api.{{ .projectName }}.sammcore.local`) se suministra como `--build-arg` durante la compilación de la imagen, o bien se provee un subpath proxy `/api/` en el Ingress del frontend.
+   - Como Vite hornea las variables `VITE_*` durante el comando `build`, la URL pública de la API (`https://api.{{ .projectName }}.sammcore.local`) se suministra como `--build-arg` durante la compilación de la imagen, o bien se provee un subpath proxy `/api/` en el NGINX del frontend.
 4. **Traducción de Volúmenes y Dependencias:**
    - Los volúmenes montados por servicios de BD se descartan.
    - Los volúmenes de almacenamiento de archivos de la app se traducen a `PersistentVolumeClaim` de 5Gi con `storageClassName: local-path`.
@@ -24,10 +24,10 @@ Cuando un repositorio contiene `docker-compose.yml`, el módulo `TemplateManager
 
 ---
 
-## 2. 🧩 Plantillas de Manifiestos por Arquetipo
+## 2. 🧩 Plantillas de Manifiestos Base por Proyecto
 
-### 🔹 2.1. Namespace y Gobernanza de Recursos
-Aplicado a todo proyecto para garantizar aislamiento multi-tenant:
+### 🔹 2.1. Namespace, Cuotas y NetworkPolicy
+Aplicado a todo proyecto para garantizar aislamiento multi-tenant sin romper la comunicación interna:
 
 ```yaml
 apiVersion: v1
@@ -62,13 +62,19 @@ spec:
     - Ingress
     - Egress
   ingress:
-    # Permitir tráfico desde el Ingress Controller de K3s
+    # 1. Tráfico intra-namespace (Web -> API, workers -> API)
+    - from:
+        - podSelector: {}
+    # 2. Tráfico desde el Ingress Controller de K3s
     - from:
         - namespaceSelector:
             matchLabels:
               kubernetes.io/metadata.name: ingress-nginx
   egress:
-    # Permitir salida a DNS interno y PostgreSQL de Supabase
+    # 1. Tráfico intra-namespace (comunicación interna entre pods del proyecto)
+    - to:
+        - podSelector: {}
+    # 2. DNS interno del clúster (UDP y TCP 53)
     - to:
         - namespaceSelector:
             matchLabels:
@@ -76,6 +82,9 @@ spec:
       ports:
         - protocol: UDP
           port: 53
+        - protocol: TCP
+          port: 53
+    # 3. Base de Datos central de Supabase (PostgreSQL 5432)
     - to:
         - namespaceSelector:
             matchLabels:
@@ -83,13 +92,14 @@ spec:
       ports:
         - protocol: TCP
           port: 5432
-    # Permitir salida a Internet (para llamadas a APIs externas)
+    # 4. Salida a Internet público (excluyendo subredes privadas RFC 1918 y pods/servicios K8s)
     - to:
         - ipBlock:
             cidr: 0.0.0.0/0
             except:
-              - 10.42.0.0/16
-              - 10.43.0.0/16
+              - 10.0.0.0/8       # Redes privadas Clase A y pods/services K3s
+              - 172.16.0.0/12    # Redes privadas Clase B
+              - 192.168.0.0/16   # LAN local física de SAMMCORE
 ```
 
 ---
@@ -115,7 +125,68 @@ stringData:
 
 ---
 
-### 🔹 2.3. Deployment de API Backend con Healthchecks y Resources
+## 3. 📦 Plantillas de Despliegue por Arquetipo
+
+### 🔹 Arquetipo 1: Stack Multi-Servicio (`compose-multi-service`)
+
+#### Web Deployment & Service:
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .projectName }}-web
+  namespace: {{ .namespace }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: {{ .projectName }}-web
+  template:
+    metadata:
+      labels:
+        app: {{ .projectName }}-web
+    spec:
+      containers:
+        - name: web
+          image: {{ .webImage }}
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: {{ .webPort }}
+          readinessProbe:
+            tcpSocket:
+              port: {{ .webPort }}
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          livenessProbe:
+            tcpSocket:
+              port: {{ .webPort }}
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 25m
+              memory: 32Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .projectName }}-web
+  namespace: {{ .namespace }}
+spec:
+  type: ClusterIP
+  selector:
+    app: {{ .projectName }}-web
+  ports:
+    - name: http
+      port: {{ .webPort }}
+      targetPort: {{ .webPort }}
+```
+
+#### API Deployment con InitContainer de BD & Service:
 ```yaml
 apiVersion: apps/v1
 kind: Deployment
@@ -132,12 +203,17 @@ spec:
       labels:
         app: {{ .projectName }}-api
     spec:
+      initContainers:
+        - name: wait-for-db
+          image: busybox:1.36
+          command: ['sh', '-c', 'until nc -z -w 2 postgres.supabase.svc.cluster.local 5432; do echo esperando postgres; sleep 2; done']
       containers:
         - name: api
           image: {{ .apiImage }}
           imagePullPolicy: IfNotPresent
           ports:
-            - containerPort: {{ .apiPort }}
+            - name: http
+              containerPort: {{ .apiPort }}
           envFrom:
             - secretRef:
                 name: {{ .projectName }}-db-secrets
@@ -174,11 +250,7 @@ spec:
       targetPort: {{ .apiPort }}
 ```
 
----
-
-### 🔹 2.4. Ingress Multi-Subdominio Dinámico (Sin TLS interno)
-> **Aclaración de Arquitectura:** El NGINX del host físico termina el TLS para `*.sammcore.local` con el certificado comodín de la LAN y reenvía HTTP al NodePort `30080` de `ingress-nginx`. Por lo tanto, el Ingress en Kubernetes **opera en HTTP plano y no requiere Secret de certificados en el namespace de cada proyecto**.
-
+#### Ingress Multi-Subdominio (Compose):
 ```yaml
 apiVersion: networking.k8s.io/v1
 kind: Ingress
@@ -190,7 +262,6 @@ metadata:
 spec:
   ingressClassName: nginx
   rules:
-    # 1. Enrutamiento del Frontend Web
     - host: {{ .projectName }}.sammcore.local
       http:
         paths:
@@ -201,8 +272,6 @@ spec:
                 name: {{ .projectName }}-web
                 port:
                   number: {{ .webPort }}
-
-    # 2. Enrutamiento del API Backend
     - host: api.{{ .projectName }}.sammcore.local
       http:
         paths:
@@ -213,4 +282,194 @@ spec:
                 name: {{ .projectName }}-api
                 port:
                   number: {{ .apiPort }}
+```
+
+---
+
+### 🔹 Arquetipo 2: Microservicio Individual (`single-dockerfile`)
+Un único pod para backend o servicio con un único host:
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .projectName }}-app
+  namespace: {{ .namespace }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: {{ .projectName }}-app
+  template:
+    metadata:
+      labels:
+        app: {{ .projectName }}-app
+    spec:
+      containers:
+        - name: app
+          image: {{ .appImage }}
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: {{ .appPort }}
+          readinessProbe:
+            tcpSocket:
+              port: {{ .appPort }}
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .projectName }}-app
+  namespace: {{ .namespace }}
+spec:
+  type: ClusterIP
+  selector:
+    app: {{ .projectName }}-app
+  ports:
+    - name: http
+      port: {{ .appPort }}
+      targetPort: {{ .appPort }}
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ .projectName }}-ingress
+  namespace: {{ .namespace }}
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: {{ .projectName }}.sammcore.local
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ .projectName }}-app
+                port:
+                  number: {{ .appPort }}
+```
+
+---
+
+### 🔹 Arquetipo 3: Sitio Web Estático (`static-web`)
+Servido mediante imagen ligera de NGINX con un único host:
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .projectName }}-static
+  namespace: {{ .namespace }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: {{ .projectName }}-static
+  template:
+    metadata:
+      labels:
+        app: {{ .projectName }}-static
+    spec:
+      containers:
+        - name: nginx
+          image: {{ .staticImage }}
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 80
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .projectName }}-static
+  namespace: {{ .namespace }}
+spec:
+  type: ClusterIP
+  selector:
+    app: {{ .projectName }}-static
+  ports:
+    - name: http
+      port: 80
+      targetPort: 80
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ .projectName }}-ingress
+  namespace: {{ .namespace }}
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: {{ .projectName }}.sammcore.local
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ .projectName }}-static
+                port:
+                  number: 80
+```
+
+---
+
+## 4. 🔨 Plantilla de Build In-Cluster con Kaniko
+
+Si el proyecto no se construye en el CI del repo cliente, `DeployManager` lanza este Job en un namespace temporal de build o en el namespace del proyecto:
+
+```yaml
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: kaniko-build-{{ .projectName }}
+  namespace: {{ .namespace }}
+spec:
+  ttlSecondsAfterFinished: 120
+  backoffLimit: 1
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: kaniko
+          image: gcr.io/kaniko-project/executor:v1.23.0
+          args:
+            - "--context=git://github.com/{{ .repoSlug }}.git#refs/heads/{{ .branch }}"
+            - "--dockerfile={{ .dockerfilePath }}"
+            - "--destination={{ .targetImage }}"
+            - "--cache=true"
+          volumeMounts:
+            - name: docker-config
+              mountPath: /kaniko/.docker
+          resources:
+            requests:
+              cpu: 500m
+              memory: 512Mi
+            limits:
+              cpu: 2000m
+              memory: 2Gi
+      volumes:
+        - name: docker-config
+          secret:
+            secretName: kaniko-registry-secret
+            items:
+              - key: .dockerconfigjson
+                path: config.json
 ```

@@ -20,6 +20,7 @@ const (
 	ProjectUnknown ProjectType = iota
 	ProjectCompose
 	ProjectDockerfile
+	ProjectStatic
 )
 
 func (t ProjectType) String() string {
@@ -28,6 +29,8 @@ func (t ProjectType) String() string {
 		return "compose"
 	case ProjectDockerfile:
 		return "dockerfile"
+	case ProjectStatic:
+		return "static"
 	default:
 		return "unknown"
 	}
@@ -77,6 +80,7 @@ func (r *RepoManager) Clone() error {
 		URL:           r.RepoURL,
 		Progress:      progressWriter(r.Verbose),
 		SingleBranch:  true,
+		Depth:         1,
 		ReferenceName: plumbing.NewBranchReferenceName(branch),
 	}
 
@@ -131,6 +135,7 @@ func (r *RepoManager) DetectProjectType() (DetectionResult, error) {
 	var evidence []string
 	hasCompose := false
 	hasDockerfile := false
+	hasStatic := false
 
 	err := filepath.WalkDir(r.Workdir, func(path string, d fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
@@ -151,6 +156,9 @@ func (r *RepoManager) DetectProjectType() (DetectionResult, error) {
 		case name == "dockerfile":
 			hasDockerfile = true
 			evidence = append(evidence, rel(r.Workdir, path))
+		case name == "index.html":
+			hasStatic = true
+			evidence = append(evidence, rel(r.Workdir, path))
 		}
 		return nil
 	})
@@ -163,6 +171,8 @@ func (r *RepoManager) DetectProjectType() (DetectionResult, error) {
 		return DetectionResult{Type: ProjectCompose, Evidence: evidence}, nil
 	case hasDockerfile:
 		return DetectionResult{Type: ProjectDockerfile, Evidence: evidence}, nil
+	case hasStatic:
+		return DetectionResult{Type: ProjectStatic, Evidence: evidence}, nil
 	default:
 		return DetectionResult{Type: ProjectUnknown, Evidence: evidence}, nil
 	}

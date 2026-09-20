@@ -13,6 +13,7 @@ func TestProjectTypeString(t *testing.T) {
 	}{
 		{ProjectCompose, "compose"},
 		{ProjectDockerfile, "dockerfile"},
+		{ProjectStatic, "static"},
 		{ProjectUnknown, "unknown"},
 	}
 
@@ -66,6 +67,29 @@ func TestDetectProjectType_Dockerfile(t *testing.T) {
 
 	if res.Type != ProjectDockerfile {
 		t.Errorf("expected ProjectDockerfile, got %v", res.Type)
+	}
+}
+
+func TestDetectProjectType_Static(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "test-static-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	indexFile := filepath.Join(tmpDir, "index.html")
+	if err := os.WriteFile(indexFile, []byte("<html><body>Hello</body></html>"), 0644); err != nil {
+		t.Fatalf("failed to write index file: %v", err)
+	}
+
+	rm := NewRepoManager("", "", tmpDir, false)
+	res, err := rm.DetectProjectType()
+	if err != nil {
+		t.Fatalf("DetectProjectType returned error: %v", err)
+	}
+
+	if res.Type != ProjectStatic {
+		t.Errorf("expected ProjectStatic, got %v", res.Type)
 	}
 }
 

@@ -1,6 +1,8 @@
-# 📄 Arquitectura Fase 4 — SAMMCORE-Deployer
+# 📄 Arquitectura Fase 4 — SAMMCORE-Deployer (Bitácora Histórica)
 
-## 1. Rol del Deployer
+> [!NOTE]
+> **Documento Histórico:** Este archivo corresponde a una bitácora preliminar de análisis y no tiene validez normativa. Para la especificación técnica oficial y vigente, consultar [02-tecnico.md](../02-tecnico.md) y [04-templates.md](../04-templates.md).
+
 
 * **Orquestador central de despliegues nativo en Kubernetes.**  
   Se encarga de:

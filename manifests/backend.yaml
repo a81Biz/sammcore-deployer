@@ -15,6 +15,7 @@ spec:
       labels:
         app: deployer-backend
     spec:
+      serviceAccountName: deployer-sa
       containers:
         - name: backend
           image: ghcr.io/a81biz/sammcore-deployer-backend:latest
@@ -25,15 +26,46 @@ spec:
           env:
             - name: PORT
               value: "8080"
+            - name: DATA_DIR
+              value: "/data"
+            - name: DEPLOYER_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: deployer-secrets
+                  key: DEPLOYER_API_KEY
+            - name: GITHUB_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: deployer-secrets
+                  key: GITHUB_TOKEN
+                  optional: true
+            - name: SUPABASE_HOST
+              valueFrom:
+                secretKeyRef:
+                  name: deployer-secrets
+                  key: SUPABASE_HOST
+            - name: SUPABASE_PORT
+              valueFrom:
+                secretKeyRef:
+                  name: deployer-secrets
+                  key: SUPABASE_PORT
+            - name: SUPABASE_POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: deployer-secrets
+                  key: SUPABASE_POSTGRES_PASSWORD
+          volumeMounts:
+            - name: data-volume
+              mountPath: /data
           readinessProbe:
             httpGet:
-              path: /health
+              path: /api/health
               port: 8080
             initialDelaySeconds: 5
             periodSeconds: 10
           livenessProbe:
             httpGet:
-              path: /health
+              path: /api/health
               port: 8080
             initialDelaySeconds: 10
             periodSeconds: 15
@@ -44,6 +76,10 @@ spec:
             limits:
               cpu: 500m
               memory: 256Mi
+      volumes:
+        - name: data-volume
+          persistentVolumeClaim:
+            claimName: deployer-data-pvc
 ---
 apiVersion: v1
 kind: Service
