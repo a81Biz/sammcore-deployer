@@ -39,6 +39,7 @@ type DeployRequest struct {
 	Repo             string            `json:"repo"`
 	Branch           string            `json:"branch,omitempty"`
 	Type             string            `json:"type,omitempty"`
+	Commit           string            `json:"commit,omitempty"`
 	RequiresDatabase *bool             `json:"requires_database,omitempty"`
 	Services         []ServiceSpec     `json:"services,omitempty"`
 	BuildArgs        map[string]string `json:"build_args,omitempty"`
@@ -516,19 +517,33 @@ func (dm *DeployManager) DeleteProjectDeployment(ctx context.Context, projectNam
 }
 
 // updateProjectStatus actualiza el estado y opcionalmente el error del proyecto
-func updateProjectStatus(p *storage.Project, status storage.ProjectStatus, lastError string) {
+// updateProjectProgress actualiza el estado, paso actual y descripción del despliegue
+func updateProjectProgress(p *storage.Project, status storage.ProjectStatus, currentStep, totalSteps int, stepDesc, lastError string) {
 	p.Status = status
+	if currentStep > 0 {
+		p.CurrentStep = currentStep
+	}
+	if totalSteps > 0 {
+		p.TotalSteps = totalSteps
+	}
+	if stepDesc != "" {
+		p.StepDescription = stepDesc
+	}
 	p.LastError = lastError
 	p.UpdatedAt = time.Now()
 	_ = storage.AddOrUpdateProject(*p)
 }
 
+func updateProjectStatus(p *storage.Project, status storage.ProjectStatus, lastError string) {
+	updateProjectProgress(p, status, p.CurrentStep, p.TotalSteps, p.StepDescription, lastError)
+}
+
 // ExecuteDeploy ejecuta la secuencia completa de despliegue con mutex por proyecto:
 // 1. Validar namespace (ownership)
-// 2. Provisionar BD si necesita
-// 3. Construir imágenes vía Kaniko (BuildManager)
-// 4. Renderizar y aplicar manifiestos K8s
-// 5. Monitorear rollout
+// 2. Provisionar BD si necesita (Paso 1)
+// 3. Construir imágenes vía Kaniko si hay servicios con código (Paso 2)
+// 4. Renderizar y aplicar manifiestos K8s (Paso 3)
+// 5. Monitorear rollout y readiness de pods (Paso 4)
 func (dm *DeployManager) ExecuteDeploy(ctx context.Context, p storage.Project, params ProjectManifestParams) error {
 	// Mutex por proyecto: evitar deploys concurrentes
 	lock := getProjectLock(p.Name)
@@ -538,15 +553,24 @@ func (dm *DeployManager) ExecuteDeploy(ctx context.Context, p storage.Project, p
 	projectName := p.Name
 	namespace := p.Namespace
 
+	// Calcular total de pasos
+	totalSteps := 3
+	if params.RequiresDatabase {
+		totalSteps = 4
+	}
+	p.TotalSteps = totalSteps
+	currentStep := 1
+
 	// 1. Si requiere base de datos, aprovisionar en PostgreSQL Supabase (Modelo A)
 	if params.RequiresDatabase {
-		updateProjectStatus(&p, storage.StatusProvisioning, "")
+		desc := fmt.Sprintf("Paso %d/%d: Aprovisionando base de datos PostgreSQL en Supabase...", currentStep, totalSteps)
+		updateProjectProgress(&p, storage.StatusProvisioning, currentStep, totalSteps, desc, "")
 
 		host, port, user, password, dbname := GetSupabaseConfig()
 		if password == "" {
 			errMsg := "SUPABASE_POSTGRES_PASSWORD no establecida, no se puede aprovisionar BD"
 			log.Printf("[Deploy] ⚠️ %s", errMsg)
-			updateProjectStatus(&p, storage.StatusFailed, errMsg)
+			updateProjectProgress(&p, storage.StatusFailed, currentStep, totalSteps, "Error al aprovisionar BD", errMsg)
 			return fmt.Errorf(errMsg)
 		}
 
@@ -554,7 +578,7 @@ func (dm *DeployManager) ExecuteDeploy(ctx context.Context, p storage.Project, p
 		if err != nil {
 			errMsg := fmt.Sprintf("error conectando a Supabase DB: %v", err)
 			log.Printf("[Deploy] %s", errMsg)
-			updateProjectStatus(&p, storage.StatusFailed, errMsg)
+			updateProjectProgress(&p, storage.StatusFailed, currentStep, totalSteps, "Error de conexión a BD", errMsg)
 			return fmt.Errorf(errMsg)
 		}
 
@@ -571,7 +595,7 @@ func (dm *DeployManager) ExecuteDeploy(ctx context.Context, p storage.Project, p
 		_ = masterDB.Close()
 		if err != nil {
 			errMsg := fmt.Sprintf("fallo al aprovisionar BD: %v", err)
-			updateProjectStatus(&p, storage.StatusFailed, errMsg)
+			updateProjectProgress(&p, storage.StatusFailed, currentStep, totalSteps, "Error al aprovisionar BD", errMsg)
 			return fmt.Errorf(errMsg)
 		}
 
@@ -588,15 +612,17 @@ func (dm *DeployManager) ExecuteDeploy(ctx context.Context, p storage.Project, p
 		}
 		if err := dm.applyNamespace(ctx, nsObj); err != nil {
 			errMsg := fmt.Sprintf("fallo al crear namespace para BD: %v", err)
-			updateProjectStatus(&p, storage.StatusFailed, errMsg)
+			updateProjectProgress(&p, storage.StatusFailed, currentStep, totalSteps, "Error al crear namespace", errMsg)
 			return fmt.Errorf(errMsg)
 		}
 
 		if err := dm.secretManager.EnsureDBSecret(ctx, namespace, projectName, provRes); err != nil {
 			errMsg := fmt.Sprintf("fallo al crear DB secret: %v", err)
-			updateProjectStatus(&p, storage.StatusFailed, errMsg)
+			updateProjectProgress(&p, storage.StatusFailed, currentStep, totalSteps, "Error al crear secreto de BD", errMsg)
 			return fmt.Errorf(errMsg)
 		}
+
+		currentStep++
 	}
 
 	// Si hay variables de entorno personalizadas, asegurar namespace y secreto
@@ -613,24 +639,45 @@ func (dm *DeployManager) ExecuteDeploy(ctx context.Context, p storage.Project, p
 		}
 		if err := dm.applyNamespace(ctx, nsObj); err != nil {
 			errMsg := fmt.Sprintf("fallo al crear namespace para env secrets: %v", err)
-			updateProjectStatus(&p, storage.StatusFailed, errMsg)
+			updateProjectProgress(&p, storage.StatusFailed, currentStep, totalSteps, "Error al crear namespace", errMsg)
 			return fmt.Errorf(errMsg)
 		}
 		if err := dm.secretManager.EnsureCustomEnvSecret(ctx, namespace, projectName, params.BuildArgs); err != nil {
 			errMsg := fmt.Sprintf("fallo al crear env secret: %v", err)
-			updateProjectStatus(&p, storage.StatusFailed, errMsg)
+			updateProjectProgress(&p, storage.StatusFailed, currentStep, totalSteps, "Error al crear secretos personalizados", errMsg)
 			return fmt.Errorf(errMsg)
 		}
 	}
 
-	// 2. Construir imágenes vía Kaniko (solo si hay servicios con BuildContext)
-	if len(params.Services) > 0 && p.Commit != "" {
-		updateProjectStatus(&p, storage.StatusBuilding, "")
+	// 2. Construir imágenes vía Kaniko (verificar si hay servicios con BuildContext)
+	needsBuild := false
+	for _, s := range params.Services {
+		if s.BuildContext != "" {
+			needsBuild = true
+			break
+		}
+	}
+
+	if needsBuild {
+		if p.Commit == "" {
+			errMsg := "no se especificó el commit del repositorio de Git para compilar las imágenes requeridas"
+			updateProjectProgress(&p, storage.StatusFailed, currentStep, totalSteps, "Error: falta commit de Git", errMsg)
+			return fmt.Errorf(errMsg)
+		}
+
+		desc := fmt.Sprintf("Paso %d/%d: Compilando imágenes Docker con Kaniko...", currentStep, totalSteps)
+		updateProjectProgress(&p, storage.StatusBuilding, currentStep, totalSteps, desc, "")
 
 		images, err := dm.buildManager.EnsureImages(ctx, p, params.Services, p.Commit)
 		if err != nil {
 			errMsg := fmt.Sprintf("fallo al construir imágenes: %v", err)
-			updateProjectStatus(&p, storage.StatusFailed, errMsg)
+			updateProjectProgress(&p, storage.StatusFailed, currentStep, totalSteps, "Error en compilación de imágenes", errMsg)
+			return fmt.Errorf(errMsg)
+		}
+
+		if len(images) == 0 {
+			errMsg := "no se generaron imágenes en el registro local para los servicios del proyecto"
+			updateProjectProgress(&p, storage.StatusFailed, currentStep, totalSteps, "Error: imágenes no generadas", errMsg)
 			return fmt.Errorf(errMsg)
 		}
 
@@ -638,24 +685,28 @@ func (dm *DeployManager) ExecuteDeploy(ctx context.Context, p storage.Project, p
 		p.Images = images
 		_ = storage.AddOrUpdateProject(p)
 	}
+	currentStep++
 
 	// 3. Renderizar y aplicar manifiestos
-	updateProjectStatus(&p, storage.StatusDeploying, "")
+	desc := fmt.Sprintf("Paso %d/%d: Aplicando manifiestos Kubernetes (Deployments, Services, Ingress)...", currentStep, totalSteps)
+	updateProjectProgress(&p, storage.StatusDeploying, currentStep, totalSteps, desc, "")
 
 	manifestsYAML, err := dm.templateManager.RenderAllManifests(params)
 	if err != nil {
 		errMsg := fmt.Sprintf("error renderizando manifiestos: %v", err)
-		updateProjectStatus(&p, storage.StatusFailed, errMsg)
+		updateProjectProgress(&p, storage.StatusFailed, currentStep, totalSteps, "Error al renderizar manifiestos", errMsg)
 		return fmt.Errorf(errMsg)
 	}
 
 	if err := dm.ApplyManifestsYAML(ctx, manifestsYAML); err != nil {
 		errMsg := fmt.Sprintf("error aplicando manifiestos en K8s: %v", err)
-		updateProjectStatus(&p, storage.StatusFailed, errMsg)
+		updateProjectProgress(&p, storage.StatusFailed, currentStep, totalSteps, "Error al aplicar manifiestos en K8s", errMsg)
 		return fmt.Errorf(errMsg)
 	}
+	currentStep++
 
 	// 4. Monitorear despliegue
+	p.CurrentStep = currentStep
 	go dm.monitorRollout(context.Background(), p)
 
 	return nil
@@ -664,6 +715,9 @@ func (dm *DeployManager) ExecuteDeploy(ctx context.Context, p storage.Project, p
 // monitorRollout verifica el estado de los Deployments hasta que todos estén listos.
 // Si excede el deadline, marca el proyecto como FAILED con el motivo detallado.
 func (dm *DeployManager) monitorRollout(ctx context.Context, p storage.Project) {
+	desc := fmt.Sprintf("Paso %d/%d: Verificando disponibilidad (readiness) de pods en K3s...", p.TotalSteps, p.TotalSteps)
+	updateProjectProgress(&p, storage.StatusDeploying, p.TotalSteps, p.TotalSteps, desc, "")
+
 	deadline := time.Now().Add(120 * time.Second)
 	for time.Now().Before(deadline) {
 		time.Sleep(5 * time.Second)
@@ -680,7 +734,7 @@ func (dm *DeployManager) monitorRollout(ctx context.Context, p storage.Project) 
 			}
 		}
 		if allReady {
-			updateProjectStatus(&p, storage.StatusRunning, "")
+			updateProjectProgress(&p, storage.StatusRunning, p.TotalSteps, p.TotalSteps, "Despliegue completado exitosamente y operativo", "")
 			log.Printf("[Deploy] Proyecto %s desplegado exitosamente en Running", p.Name)
 			return
 		}
@@ -689,8 +743,7 @@ func (dm *DeployManager) monitorRollout(ctx context.Context, p storage.Project) 
 	// TIMEOUT: recopilar motivos de fallo de los pods
 	failReason := dm.collectFailureReasons(ctx, p.Namespace)
 	errMsg := fmt.Sprintf("timeout esperando rollout (120s): %s", failReason)
-	log.Printf("[Deploy] ⚠️ Proyecto %s: %s", p.Name, errMsg)
-	updateProjectStatus(&p, storage.StatusFailed, errMsg)
+	updateProjectProgress(&p, storage.StatusFailed, p.TotalSteps, p.TotalSteps, "Despliegue fallido por timeout de pods", errMsg)
 }
 
 // collectFailureReasons examina los pods del namespace y recopila los motivos de fallo

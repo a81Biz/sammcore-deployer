@@ -69,9 +69,33 @@ export interface DeployPayload {
   repo: string;
   branch?: string;
   type?: string;
+  commit?: string;
   requires_database?: boolean;
   services?: ServiceSpec[];
   build_args?: Record<string, string>;
+}
+
+export interface Project {
+  id: string;
+  name: string;
+  repo: string;
+  branch: string;
+  type: string;
+  namespace: string;
+  domain: string;
+  api_domain?: string;
+  requires_database: boolean;
+  status: string;
+  services?: ServiceSpec[];
+  commit?: string;
+  images?: Record<string, string>;
+  env?: Record<string, string>;
+  last_error?: string;
+  current_step?: number;
+  total_steps?: number;
+  step_description?: string;
+  created_at: string;
+  updated_at: string;
 }
 
 export async function deployProject(payload: DeployPayload) {
@@ -87,14 +111,22 @@ export async function deployProject(payload: DeployPayload) {
   return data;
 }
 
-export async function getProjects() {
-
+export async function getProjects(): Promise<Project[]> {
   const res = await authFetch("/projects");
   if (!res.ok) {
     const err = await res.json().catch(() => ({ error: "Error al cargar proyectos" }));
     throw new Error(err.error || `Error ${res.status}`);
   }
   return res.json();
+}
+
+export async function getProject(id: string): Promise<Project> {
+  const res = await authFetch(`/projects/${id}`);
+  const data = await res.json().catch(() => ({ error: "Error al obtener proyecto" }));
+  if (!res.ok) {
+    throw new Error(data.error || `Error ${res.status}`);
+  }
+  return data;
 }
 
 export async function getProjectLogs(id: string) {

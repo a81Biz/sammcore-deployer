@@ -1,6 +1,8 @@
-import { useState } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useNavigate } from "react-router-dom";
-import { analyzeRepo, deployProject, DeployPayload, ServiceSpec } from "../services/api";
+import { analyzeRepo, deployProject, getProject, DeployPayload, ServiceSpec, Project } from "../services/api";
+import DeploymentProgress from "../components/DeploymentProgress";
+import Modal from "../components/Modal";
 
 export default function RegistrarProyecto() {
   const navigate = useNavigate();
@@ -21,10 +23,24 @@ export default function RegistrarProyecto() {
   const [newEnvKey, setNewEnvKey] = useState("");
   const [newEnvVal, setNewEnvVal] = useState("");
 
-  // Paso 3: Despliegue
+  // Paso 3: Despliegue y Progreso en vivo
   const [loadingDeploy, setLoadingDeploy] = useState(false);
   const [deployError, setDeployError] = useState<string | null>(null);
-  const [deploySuccess, setDeploySuccess] = useState<any | null>(null);
+  const [deploySuccess, setDeploySuccess] = useState<boolean>(false);
+  const [activeProject, setActiveProject] = useState<Project | null>(null);
+  const pollTimerRef = useRef<NodeJS.Timeout | null>(null);
+
+  // Modal genérico
+  const [modalState, setModalState] = useState<{
+    isOpen: boolean;
+    title: string;
+    content: React.ReactNode;
+    variant?: "primary" | "danger" | "info";
+  }>({
+    isOpen: false,
+    title: "",
+    content: null,
+  });
 
   const handleAnalyze = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -100,6 +116,7 @@ export default function RegistrarProyecto() {
       repo: repo.trim(),
       branch: branch.trim() || "main",
       type: projectType,
+      commit: analysisData?.commit,
       requires_database: requiresDatabase,
       services: services,
       build_args: Object.keys(buildArgsObj).length > 0 ? buildArgsObj : undefined,
@@ -107,13 +124,36 @@ export default function RegistrarProyecto() {
 
     try {
       const res = await deployProject(payload);
-      setDeploySuccess(res);
+      setDeploySuccess(true);
+      if (res.project) {
+        setActiveProject(res.project);
+      }
     } catch (err: any) {
       setDeployError(err.message || "Error al iniciar el despliegue.");
     } finally {
       setLoadingDeploy(false);
     }
   };
+
+  // Polling automático del proyecto activo si está desplegándose
+  useEffect(() => {
+    if (!activeProject) return;
+
+    if (activeProject.status !== "running" && activeProject.status !== "failed") {
+      pollTimerRef.current = setTimeout(async () => {
+        try {
+          const updated = await getProject(activeProject.id);
+          setActiveProject(updated);
+        } catch (e) {
+          // Ignorar fallo transitorio de polling
+        }
+      }, 3000);
+    }
+
+    return () => {
+      if (pollTimerRef.current) clearTimeout(pollTimerRef.current);
+    };
+  }, [activeProject]);
 
   // Derivar dominios de los servicios
   const webService = services.find(s => s.role === "web");
@@ -475,22 +515,31 @@ export default function RegistrarProyecto() {
         </div>
       )}
 
-      {/* PASO 3: Confirmación de Despliegue Exitoso */}
+      {/* PASO 3: Progreso del Despliegue en Vivo */}
       {deploySuccess && (
-        <div style={{ ...cardStyle, border: "1px solid #22c55e", background: "rgba(34, 197, 94, 0.06)" }}>
-          <h3 style={{ margin: "0 0 12px 0", color: "#4ade80", fontSize: "1.3rem", display: "flex", alignItems: "center", gap: "8px" }}>
-            ✅ ¡Despliegue Iniciado Correctamente!
-          </h3>
-          <p style={{ margin: "0 0 16px 0", color: "#bbf7d0", fontSize: "0.95rem", lineHeight: 1.5 }}>
-            El proyecto <strong>{projectName}</strong> ha sido enviado a la cola de orquestación de Kubernetes.
-            El deployer construirá las imágenes vía Kaniko, creará el Namespace, aprovisionará la base de datos y expondrá los subdominios Ingress.
-          </p>
-          <div style={{ display: "flex", gap: "12px" }}>
+        <div style={{ marginTop: "24px" }}>
+          {activeProject ? (
+            <DeploymentProgress
+              project={activeProject}
+              onViewLogs={() => navigate("/estado")}
+            />
+          ) : (
+            <div style={{ ...cardStyle, border: "1px solid #22c55e", background: "rgba(34, 197, 94, 0.06)" }}>
+              <h3 style={{ margin: "0 0 12px 0", color: "#4ade80", fontSize: "1.3rem", display: "flex", alignItems: "center", gap: "8px" }}>
+                ✅ ¡Despliegue Iniciado Correctamente!
+              </h3>
+              <p style={{ margin: "0 0 16px 0", color: "#bbf7d0", fontSize: "0.95rem", lineHeight: 1.5 }}>
+                El proyecto <strong>{projectName}</strong> ha sido enviado a la cola de orquestación de Kubernetes.
+              </p>
+            </div>
+          )}
+
+          <div style={{ display: "flex", gap: "12px", marginTop: "16px" }}>
             <button
               onClick={() => navigate("/estado")}
               style={{
                 padding: "10px 20px",
-                background: "#22c55e",
+                background: "#2563eb",
                 color: "#fff",
                 border: "none",
                 borderRadius: "6px",
@@ -498,11 +547,12 @@ export default function RegistrarProyecto() {
                 cursor: "pointer",
               }}
             >
-              📊 Ver Estado de Proyectos y Métricas
+              📊 Ir a Supervisión Completa en /estado
             </button>
             <button
               onClick={() => {
-                setDeploySuccess(null);
+                setDeploySuccess(false);
+                setActiveProject(null);
                 setAnalysisData(null);
                 setRepo("");
                 setServices([]);
@@ -522,6 +572,16 @@ export default function RegistrarProyecto() {
           </div>
         </div>
       )}
+
+      {/* Modal Reutilizable */}
+      <Modal
+        isOpen={modalState.isOpen}
+        title={modalState.title}
+        onClose={() => setModalState((prev) => ({ ...prev, isOpen: false }))}
+        variant={modalState.variant}
+      >
+        {modalState.content}
+      </Modal>
     </div>
   );
 }

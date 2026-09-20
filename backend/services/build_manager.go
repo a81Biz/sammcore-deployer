@@ -232,8 +232,13 @@ func (bm *BuildManager) EnsureImages(ctx context.Context, p storage.Project, ser
 		case <-timeout:
 			return nil, fmt.Errorf("timeout de 15 minutos alcanzado esperando los builds")
 		case <-ticker.C:
-			// Actualizar estado del proyecto a construyendo
+			// Actualizar estado del proyecto a construyendo con conteo
 			p.Status = storage.StatusBuilding
+			if p.TotalSteps > 0 {
+				p.StepDescription = fmt.Sprintf("Paso %d/%d: Compilando imágenes con Kaniko (%d/%d completadas)...", p.CurrentStep, p.TotalSteps, len(completedJobs), len(jobNames))
+			} else {
+				p.StepDescription = fmt.Sprintf("Compilando imágenes con Kaniko (%d/%d completadas)...", len(completedJobs), len(jobNames))
+			}
 			_ = storage.AddOrUpdateProject(p)
 
 			allDone := true

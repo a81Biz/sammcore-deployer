@@ -270,7 +270,22 @@ func redeployHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	p.Status = storage.StatusDeploying
+	// Re-verificar commit si no estaba guardado
+	if p.Commit == "" {
+		analyzed := core.Analyze(core.AnalyzeRequest{Repo: p.Repo, Branch: p.Branch})
+		if analyzed.Status == "ok" && analyzed.Commit != "" {
+			p.Commit = analyzed.Commit
+		}
+	}
+
+	totalSteps := 3
+	if p.RequiresDatabase {
+		totalSteps = 4
+	}
+	p.CurrentStep = 1
+	p.TotalSteps = totalSteps
+	p.StepDescription = "Iniciando re-despliegue..."
+	p.Status = storage.StatusProvisioning
 	p.LastError = ""
 	p.UpdatedAt = time.Now()
 	_ = storage.AddOrUpdateProject(*p)
@@ -359,13 +374,23 @@ func deployHandler(w http.ResponseWriter, r *http.Request) {
 
 	// Usar servicios del request (enviados por la UI) o re-analizar
 	svcSpecs := req.Services
-	commit := ""
-	if len(svcSpecs) == 0 {
+	commit := strings.TrimSpace(req.Commit)
+
+	if commit == "" || len(svcSpecs) == 0 {
 		analyzed := core.Analyze(core.AnalyzeRequest{Repo: repo, Branch: branch})
 		if analyzed.Status == "ok" {
-			svcSpecs = analyzed.Services
-			commit = analyzed.Commit
+			if len(svcSpecs) == 0 {
+				svcSpecs = analyzed.Services
+			}
+			if commit == "" {
+				commit = analyzed.Commit
+			}
 		}
+	}
+
+	totalSteps := 3
+	if reqDB {
+		totalSteps = 4
 	}
 
 	projectID := strings.ToLower(core.DeriveDeterministicID(repo))
@@ -389,6 +414,9 @@ func deployHandler(w http.ResponseWriter, r *http.Request) {
 		Services:         serviceSpecsToStorageInfo(svcSpecs),
 		Commit:           commit,
 		Env:              req.BuildArgs,
+		CurrentStep:      1,
+		TotalSteps:       totalSteps,
+		StepDescription:  "Iniciando secuencia de despliegue...",
 		CreatedAt:        time.Now(),
 		UpdatedAt:        time.Now(),
 	}

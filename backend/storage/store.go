@@ -38,6 +38,9 @@ type Project struct {
 	Images           map[string]string `json:"images,omitempty"`
 	Env              map[string]string `json:"env,omitempty"`
 	LastError        string            `json:"last_error,omitempty"`
+	CurrentStep      int               `json:"current_step,omitempty"`
+	TotalSteps       int               `json:"total_steps,omitempty"`
+	StepDescription  string            `json:"step_description,omitempty"`
 	CreatedAt        time.Time         `json:"created_at"`
 	UpdatedAt        time.Time         `json:"updated_at"`
 }
