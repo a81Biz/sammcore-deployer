@@ -55,3 +55,27 @@ func TestAnalyze_InvalidRepo(t *testing.T) {
 		t.Errorf("expected INVALID_REPO_URL, got %v", resp)
 	}
 }
+
+func TestAnalyzeLiveBackroom(t *testing.T) {
+	resp := Analyze(AnalyzeRequest{
+		Repo:   "https://github.com/a81Biz/backroom",
+		Branch: "main",
+	})
+	if resp.Status != "ok" {
+		t.Fatalf("Analyze returned error: %v", resp.Error)
+	}
+	if resp.Type != "compose" {
+		t.Errorf("expected type compose, got %s", resp.Type)
+	}
+	if !resp.RequiresDatabase {
+		t.Errorf("expected requires_database=true")
+	}
+	if resp.Name != "backroom" {
+		t.Errorf("expected name backroom, got %s", resp.Name)
+	}
+	if resp.APIDomain != "backroom-api.sammcore.local" {
+		t.Errorf("expected api domain backroom-api.sammcore.local, got %s", resp.APIDomain)
+	}
+	t.Logf("Backroom Analysis Result: %+v", resp)
+}
+

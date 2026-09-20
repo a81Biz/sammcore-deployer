@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
@@ -349,7 +350,7 @@ func (r *RepoManager) DetectProjectType() (DetectionResult, error) {
 	return res, nil
 }
 
-func progressWriter(verbose bool) *os.File {
+func progressWriter(verbose bool) io.Writer {
 	if verbose {
 		return os.Stdout
 	}
