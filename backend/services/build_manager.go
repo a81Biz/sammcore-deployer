@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"regexp"
 	"strings"
 	"time"
 
@@ -21,6 +22,51 @@ import (
 	"sammcore-deployer/secrets"
 	"sammcore-deployer/storage"
 )
+
+var ansiRegex = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
+
+// stripANSI remueve los caracteres y códigos de escape de color ANSI emitidos por Kaniko
+func stripANSI(str string) string {
+	return ansiRegex.ReplaceAllString(str, "")
+}
+
+// sanitizeBuildLogs limpia el volcado excesivo de APT/debconf y conserva solo las líneas críticas del build
+func sanitizeBuildLogs(raw string, isOOM bool, sName string) string {
+	cleaned := stripANSI(raw)
+	lines := strings.Split(cleaned, "\n")
+	var keptLines []string
+
+	for _, l := range lines {
+		trimmed := strings.TrimSpace(l)
+		if trimmed == "" {
+			continue
+		}
+		// Descartar ruido de instalación de paquetes Debian/APT
+		if strings.HasPrefix(trimmed, "Setting up ") ||
+			strings.HasPrefix(trimmed, "Unpacking ") ||
+			strings.HasPrefix(trimmed, "Selecting previously unselected ") ||
+			strings.HasPrefix(trimmed, "Preparing to unpack ") ||
+			strings.HasPrefix(trimmed, "Get:") ||
+			strings.HasPrefix(trimmed, "debconf: ") ||
+			strings.HasPrefix(trimmed, "Processing triggers for ") ||
+			strings.HasPrefix(trimmed, "Reading database ") {
+			continue
+		}
+		keptLines = append(keptLines, l)
+	}
+
+	// Mantener únicamente las últimas 30 líneas más relevantes
+	if len(keptLines) > 30 {
+		keptLines = keptLines[len(keptLines)-30:]
+	}
+
+	result := strings.Join(keptLines, "\n")
+	if isOOM {
+		header := fmt.Sprintf("💥 ERROR: El build del servicio '%s' superó el límite de memoria asignado (OOMKilled).\nEl contenedor fue terminado por el kernel al exceder la RAM configurada durante el snapshot del filesystem.\n\nÚltimos logs relevantes antes del fallo:\n", sName)
+		result = header + result
+	}
+	return result
+}
 
 // BuildManager gestiona la construcción de imágenes de Docker mediante Jobs de Kaniko en K3s
 // y las empuja al registro local.
@@ -48,24 +94,23 @@ func (bm *BuildManager) imageExistsInRegistry(project, service, tag string) bool
 	return resp.StatusCode == http.StatusOK
 }
 
-// EnsureImages construye las imágenes de Docker para cada servicio a través de Jobs de Kaniko
-// en el namespace deployer-builds.
-// Devuelve un mapa de nombre de servicio -> referencia completa de la imagen.
-// Formato de tag: <registryURL>/<project>/<service>:<commit[:12]>
-// Si el tag ya existe en el registro, omite la construcción.
+// EnsureImages construye las imágenes de Docker para cada servicio de forma secuencial
+// a través de Jobs de Kaniko en el namespace deployer-builds.
 func (bm *BuildManager) EnsureImages(ctx context.Context, p storage.Project, services []ServiceSpec, commit string) (map[string]string, error) {
-	// 1. Derivar el tag y comprobar qué servicios necesitan build
 	images := make(map[string]string)
 	shortCommit := commit
 	if len(shortCommit) > 12 {
 		shortCommit = shortCommit[:12]
 	}
 
-	buildsNeeded := make(map[string]ServiceSpec)
+	type buildTask struct {
+		name string
+		spec ServiceSpec
+	}
+	var buildsNeeded []buildTask
 
 	for _, s := range services {
 		if s.BuildContext == "" || s.Dockerfile == "" {
-			// omitir si no tiene build context o dockerfile
 			continue
 		}
 
@@ -78,14 +123,14 @@ func (bm *BuildManager) EnsureImages(ctx context.Context, p storage.Project, ser
 		}
 
 		images[s.Name] = fullImageRef
-		buildsNeeded[s.Name] = s
+		buildsNeeded = append(buildsNeeded, buildTask{name: s.Name, spec: s})
 	}
 
 	if len(buildsNeeded) == 0 {
 		return images, nil
 	}
 
-	// 3. Asegurar que el namespace deployer-builds existe
+	// Asegurar que el namespace deployer-builds existe
 	nsName := "deployer-builds"
 	_, err := bm.kubeClient.CoreV1().Namespaces().Get(ctx, nsName, metav1.GetOptions{})
 	if err != nil {
@@ -106,7 +151,6 @@ func (bm *BuildManager) EnsureImages(ctx context.Context, p storage.Project, ser
 		}
 	}
 
-	// 4. Crear los Jobs de Kaniko
 	repoURL := p.Repo
 	githubToken := secrets.GetGithubToken()
 	if githubToken != "" {
@@ -117,9 +161,13 @@ func (bm *BuildManager) EnsureImages(ctx context.Context, p storage.Project, ser
 		}
 	}
 
-	jobNames := make(map[string]string) // map service name -> job name
+	// Compilación secuencial servicio por servicio
+	totalBuilds := len(buildsNeeded)
+	for idx, task := range buildsNeeded {
+		sName := task.name
+		sSpec := task.spec
+		buildIndex := idx + 1
 
-	for sName, sSpec := range buildsNeeded {
 		jobNameCommit := commit
 		if len(jobNameCommit) > 8 {
 			jobNameCommit = jobNameCommit[:8]
@@ -130,16 +178,29 @@ func (bm *BuildManager) EnsureImages(ctx context.Context, p storage.Project, ser
 			jobName = strings.TrimSuffix(jobName, "-")
 		}
 
-		jobNames[sName] = jobName
 		fullImageRef := images[sName]
 
-		ttlSeconds := int32(600)
+		// Actualizar estado en storage en tiempo real
+		p.Status = storage.StatusBuilding
+		if p.TotalSteps > 0 {
+			p.StepDescription = fmt.Sprintf("Paso %d/%d: Compilando imagen de '%s' (%d/%d)...", p.CurrentStep, p.TotalSteps, sName, buildIndex, totalBuilds)
+		} else {
+			p.StepDescription = fmt.Sprintf("Compilando imagen de '%s' (%d/%d)...", sName, buildIndex, totalBuilds)
+		}
+		_ = storage.AddOrUpdateProject(p)
+
+		ttlSeconds := int32(300)
 		backoffLimit := int32(0)
 
 		job := &batchv1.Job{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      jobName,
 				Namespace: nsName,
+				Labels: map[string]string{
+					"app.kubernetes.io/managed-by": "sammcore-deployer",
+					"project":                      p.Name,
+					"service":                      sName,
+				},
 			},
 			Spec: batchv1.JobSpec{
 				TTLSecondsAfterFinished: &ttlSeconds,
@@ -147,7 +208,10 @@ func (bm *BuildManager) EnsureImages(ctx context.Context, p storage.Project, ser
 				Template: corev1.PodTemplateSpec{
 					ObjectMeta: metav1.ObjectMeta{
 						Labels: map[string]string{
-							"job-name": jobName,
+							"job-name":                     jobName,
+							"app.kubernetes.io/managed-by": "sammcore-deployer",
+							"project":                      p.Name,
+							"service":                      sName,
 						},
 					},
 					Spec: corev1.PodSpec{
@@ -174,6 +238,16 @@ func (bm *BuildManager) EnsureImages(ctx context.Context, p storage.Project, ser
 										MountPath: "/workspace",
 									},
 								},
+								Resources: corev1.ResourceRequirements{
+									Requests: corev1.ResourceList{
+										corev1.ResourceCPU:    resource.MustParse("50m"),
+										corev1.ResourceMemory: resource.MustParse("64Mi"),
+									},
+									Limits: corev1.ResourceList{
+										corev1.ResourceCPU:    resource.MustParse("200m"),
+										corev1.ResourceMemory: resource.MustParse("256Mi"),
+									},
+								},
 							},
 						},
 						Containers: []corev1.Container{
@@ -188,6 +262,7 @@ func (bm *BuildManager) EnsureImages(ctx context.Context, p storage.Project, ser
 									"--insecure",
 									"--skip-tls-verify",
 									"--cache=true",
+									"--snapshot-mode=redo",
 								},
 								VolumeMounts: []corev1.VolumeMount{
 									{
@@ -197,12 +272,12 @@ func (bm *BuildManager) EnsureImages(ctx context.Context, p storage.Project, ser
 								},
 								Resources: corev1.ResourceRequirements{
 									Requests: corev1.ResourceList{
-										corev1.ResourceCPU:    resource.MustParse("100m"),
-										corev1.ResourceMemory: resource.MustParse("256Mi"),
+										corev1.ResourceCPU:    resource.MustParse("200m"),
+										corev1.ResourceMemory: resource.MustParse("512Mi"),
 									},
 									Limits: corev1.ResourceList{
-										corev1.ResourceCPU:    resource.MustParse("1000m"),
-										corev1.ResourceMemory: resource.MustParse("1Gi"),
+										corev1.ResourceCPU:    resource.MustParse("2500m"),
+										corev1.ResourceMemory: resource.MustParse("3500Mi"),
 									},
 								},
 							},
@@ -212,77 +287,59 @@ func (bm *BuildManager) EnsureImages(ctx context.Context, p storage.Project, ser
 			},
 		}
 
+		// Eliminar Job previo si existía con el mismo nombre
+		_ = bm.kubeClient.BatchV1().Jobs(nsName).Delete(ctx, jobName, metav1.DeleteOptions{
+			PropagationPolicy: func() *metav1.DeletionPropagation { p := metav1.DeletePropagationBackground; return &p }(),
+		})
+
 		_, err := bm.kubeClient.BatchV1().Jobs(nsName).Create(ctx, job, metav1.CreateOptions{})
 		if err != nil && !errors.IsAlreadyExists(err) {
 			return nil, fmt.Errorf("error al crear el Job de Kaniko para %s: %v", sName, err)
 		}
-	}
 
-	// 5. Esperar a que se completen los Jobs
-	timeout := time.After(15 * time.Minute)
-	ticker := time.NewTicker(5 * time.Second)
-	defer ticker.Stop()
+		// Monitorear finalización del Job (timeout 15 minutos)
+		jobTimeout := time.After(15 * time.Minute)
+		ticker := time.NewTicker(3 * time.Second)
+		defer ticker.Stop()
 
-	completedJobs := make(map[string]bool)
-
-	for {
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		case <-timeout:
-			return nil, fmt.Errorf("timeout de 15 minutos alcanzado esperando los builds")
-		case <-ticker.C:
-			// Actualizar estado del proyecto a construyendo con conteo
-			p.Status = storage.StatusBuilding
-			if p.TotalSteps > 0 {
-				p.StepDescription = fmt.Sprintf("Paso %d/%d: Compilando imágenes con Kaniko (%d/%d completadas)...", p.CurrentStep, p.TotalSteps, len(completedJobs), len(jobNames))
-			} else {
-				p.StepDescription = fmt.Sprintf("Compilando imágenes con Kaniko (%d/%d completadas)...", len(completedJobs), len(jobNames))
-			}
-			_ = storage.AddOrUpdateProject(p)
-
-			allDone := true
-			for sName, jobName := range jobNames {
-				if completedJobs[sName] {
-					continue
-				}
-
-				job, err := bm.kubeClient.BatchV1().Jobs(nsName).Get(ctx, jobName, metav1.GetOptions{})
+		jobFinished := false
+		for !jobFinished {
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-jobTimeout:
+				return nil, fmt.Errorf("timeout de 15 minutos alcanzado esperando el build de %s", sName)
+			case <-ticker.C:
+				currentJob, err := bm.kubeClient.BatchV1().Jobs(nsName).Get(ctx, jobName, metav1.GetOptions{})
 				if err != nil {
-					log.Printf("Error al obtener el Job %s: %v", jobName, err)
+					log.Printf("Error al verificar Job %s: %v", jobName, err)
 					continue
 				}
 
-				if job.Status.Succeeded > 0 {
-					completedJobs[sName] = true
-					// 8. Limpiar Jobs completados con éxito (en realidad el TTL los limpiará, pero podemos forzar)
+				if currentJob.Status.Succeeded > 0 {
+					jobFinished = true
 					policy := metav1.DeletePropagationBackground
 					_ = bm.kubeClient.BatchV1().Jobs(nsName).Delete(ctx, jobName, metav1.DeleteOptions{
 						PropagationPolicy: &policy,
 					})
-				} else if job.Status.Failed > 0 {
-					// 7. Si falla, obtener logs del pod fallido
-					logs, logErr := bm.getJobPodLogs(ctx, nsName, jobName)
+				} else if currentJob.Status.Failed > 0 {
+					failLogs, logErr := bm.getJobFailureDetails(ctx, nsName, jobName, sName)
 					if logErr != nil {
-						logs = fmt.Sprintf("no se pudieron obtener los logs: %v", logErr)
+						failLogs = fmt.Sprintf("Error en build de %s (no se pudieron obtener logs: %v)", sName, logErr)
 					}
-					p.LastError = logs
+					p.LastError = failLogs
 					_ = storage.AddOrUpdateProject(p)
-					return nil, fmt.Errorf("el build para el servicio %s falló: %s", sName, logs)
-				} else {
-					allDone = false
+					return nil, fmt.Errorf("%s", failLogs)
 				}
-			}
-
-			if allDone {
-				return images, nil
 			}
 		}
 	}
+
+	return images, nil
 }
 
-// getJobPodLogs obtiene los logs del contenedor kaniko del pod asociado a un Job
-func (bm *BuildManager) getJobPodLogs(ctx context.Context, namespace, jobName string) (string, error) {
+// getJobFailureDetails obtiene el log sanitizado y determina si ocurrió un OOM
+func (bm *BuildManager) getJobFailureDetails(ctx context.Context, namespace, jobName, sName string) (string, error) {
 	labelSelector := fmt.Sprintf("job-name=%s", jobName)
 	pods, err := bm.kubeClient.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{
 		LabelSelector: labelSelector,
@@ -294,20 +351,117 @@ func (bm *BuildManager) getJobPodLogs(ctx context.Context, namespace, jobName st
 		return "", fmt.Errorf("no se encontraron pods para el job %s", jobName)
 	}
 
-	podName := pods.Items[0].Name
-	req := bm.kubeClient.CoreV1().Pods(namespace).GetLogs(podName, &corev1.PodLogOptions{
-		Container: "kaniko",
+	pod := pods.Items[0]
+	isOOM := false
+
+	for _, cs := range append(pod.Status.InitContainerStatuses, pod.Status.ContainerStatuses...) {
+		if cs.State.Terminated != nil {
+			if cs.State.Terminated.Reason == "OOMKilled" || cs.State.Terminated.ExitCode == 137 {
+				isOOM = true
+				break
+			}
+		}
+	}
+
+	containerToLog := "kaniko"
+	for _, ics := range pod.Status.InitContainerStatuses {
+		if ics.State.Terminated != nil && ics.State.Terminated.ExitCode != 0 {
+			containerToLog = ics.Name
+			break
+		}
+	}
+
+	tail := int64(80)
+	req := bm.kubeClient.CoreV1().Pods(namespace).GetLogs(pod.Name, &corev1.PodLogOptions{
+		Container: containerToLog,
+		TailLines: &tail,
 	})
 	podLogs, err := req.Stream(ctx)
 	if err != nil {
+		if isOOM {
+			return fmt.Sprintf("💥 ERROR: El contenedor '%s' del servicio '%s' fue terminado por falta de memoria (OOMKilled - límite de RAM excedido).", containerToLog, sName), nil
+		}
 		return "", err
 	}
 	defer podLogs.Close()
 
 	buf := new(strings.Builder)
-	_, err = io.Copy(buf, podLogs)
+	_, _ = io.Copy(buf, podLogs)
+
+	return sanitizeBuildLogs(buf.String(), isOOM, sName), nil
+}
+
+// GetActiveBuildLogs retorna los logs en tiempo real del pod de Kaniko que esté compilando actualmente para este proyecto
+func (bm *BuildManager) GetActiveBuildLogs(ctx context.Context, projectName string) (string, error) {
+	pods, err := bm.kubeClient.CoreV1().Pods("deployer-builds").List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return "", err
 	}
-	return buf.String(), nil
+
+	prefix := fmt.Sprintf("build-%s-", projectName)
+	var latestPod *corev1.Pod
+
+	for i := range pods.Items {
+		pod := &pods.Items[i]
+		if strings.HasPrefix(pod.Name, prefix) {
+			if latestPod == nil || pod.CreationTimestamp.After(latestPod.CreationTimestamp.Time) {
+				latestPod = pod
+			}
+		}
+	}
+
+	if latestPod == nil {
+		return "No hay tareas de compilación activas en deployer-builds para este proyecto.", nil
+	}
+
+	for _, ics := range latestPod.Status.InitContainerStatuses {
+		if ics.Name == "git-clone" && (ics.State.Running != nil || ics.State.Waiting != nil) {
+			return fmt.Sprintf("Pod %s: Clonando código fuente desde GitHub...", latestPod.Name), nil
+		}
+	}
+
+	tail := int64(50)
+	req := bm.kubeClient.CoreV1().Pods("deployer-builds").GetLogs(latestPod.Name, &corev1.PodLogOptions{
+		Container: "kaniko",
+		TailLines: &tail,
+	})
+	podLogs, err := req.Stream(ctx)
+	if err != nil {
+		return fmt.Sprintf("Pod %s (%s): Inicializando ejecutor Kaniko...", latestPod.Name, latestPod.Status.Phase), nil
+	}
+	defer podLogs.Close()
+
+	buf := new(strings.Builder)
+	_, _ = io.Copy(buf, podLogs)
+
+	cleaned := stripANSI(buf.String())
+	lines := strings.Split(cleaned, "\n")
+	var kept []string
+	for _, l := range lines {
+		trimmed := strings.TrimSpace(l)
+		if trimmed == "" {
+			continue
+		}
+		if strings.HasPrefix(trimmed, "Setting up ") ||
+			strings.HasPrefix(trimmed, "Unpacking ") ||
+			strings.HasPrefix(trimmed, "Selecting previously unselected ") ||
+			strings.HasPrefix(trimmed, "Preparing to unpack ") ||
+			strings.HasPrefix(trimmed, "Get:") ||
+			strings.HasPrefix(trimmed, "debconf: ") ||
+			strings.HasPrefix(trimmed, "Processing triggers for ") ||
+			strings.HasPrefix(trimmed, "Reading database ") {
+			continue
+		}
+		kept = append(kept, l)
+	}
+
+	if len(kept) == 0 {
+		return fmt.Sprintf("Pod %s: Iniciando construcción de imagen...", latestPod.Name), nil
+	}
+
+	if len(kept) > 35 {
+		kept = kept[len(kept)-35:]
+	}
+
+	return strings.Join(kept, "\n"), nil
 }

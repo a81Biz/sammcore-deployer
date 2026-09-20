@@ -193,10 +193,44 @@ func logsHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 1. Si está en fase de compilación con Kaniko, obtener logs en vivo del pod de Kaniko
+	if p.Status == storage.StatusBuilding {
+		buildLogs, errB := dm.GetActiveBuildLogs(r.Context(), p.Name)
+		if errB == nil && strings.TrimSpace(buildLogs) != "" {
+			_ = json.NewEncoder(w).Encode(map[string]string{
+				"id":   id,
+				"logs": buildLogs,
+			})
+			return
+		}
+	}
+
+	// 2. Si el proyecto falló y tiene LastError guardado (por ejemplo tras rollback), mostrarlo
+	if p.Status == storage.StatusFailed && strings.TrimSpace(p.LastError) != "" {
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"id":   id,
+			"logs": p.LastError,
+		})
+		return
+	}
+
+	// 3. Consultar pods en el namespace del proyecto
 	logs, err := dm.GetPodLogs(r.Context(), p.Namespace, 100)
 	if err != nil {
+		if strings.TrimSpace(p.LastError) != "" {
+			_ = json.NewEncoder(w).Encode(map[string]string{
+				"id":   id,
+				"logs": p.LastError,
+			})
+			return
+		}
 		writeJSONError(w, http.StatusInternalServerError, err.Error(), "LOGS_ERROR")
 		return
+	}
+
+	// Si no hay pods en el namespace pero hay un error previo registrado
+	if strings.Contains(logs, "No se encontraron pods") && strings.TrimSpace(p.LastError) != "" {
+		logs = p.LastError
 	}
 
 	_ = json.NewEncoder(w).Encode(map[string]string{

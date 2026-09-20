@@ -354,6 +354,14 @@ func (dm *DeployManager) GetPodLogs(ctx context.Context, namespace string, tailL
 	return buf.String(), nil
 }
 
+// GetActiveBuildLogs retorna los logs de compilación del pod de Kaniko activo para el proyecto
+func (dm *DeployManager) GetActiveBuildLogs(ctx context.Context, projectName string) (string, error) {
+	if dm.buildManager == nil {
+		return "", fmt.Errorf("buildManager no inicializado")
+	}
+	return dm.buildManager.GetActiveBuildLogs(ctx, projectName)
+}
+
 type ContainerMetricInfo struct {
 	Name        string `json:"name"`
 	CPUUsage    string `json:"cpu_usage"`
@@ -381,21 +389,32 @@ type ProjectMetrics struct {
 	QuotaLimits map[string]string `json:"quota_limits,omitempty"`
 }
 
-// GetProjectMetrics consulta dinámicamente el estado y recursos de los pods de un proyecto en K8s
+// GetProjectMetrics consulta dinámicamente el estado y recursos de los pods de un proyecto en K8s.
+// Si el proyecto se encuentra compilando, consulta el namespace deployer-builds para mostrar
+// las métricas en vivo del pod de Kaniko.
 func (dm *DeployManager) GetProjectMetrics(ctx context.Context, p storage.Project) (*ProjectMetrics, error) {
+	targetNamespace := p.Namespace
+	labelSelector := ""
+	if p.Status == storage.StatusBuilding {
+		targetNamespace = "deployer-builds"
+		labelSelector = fmt.Sprintf("project=%s", p.Name)
+	}
+
 	metrics := &ProjectMetrics{
 		ProjectID:   p.ID,
 		ProjectName: p.Name,
-		Namespace:   p.Namespace,
+		Namespace:   targetNamespace,
 		Status:      string(p.Status),
 		Pods:        make([]PodMetricInfo, 0),
 		QuotaUsage:  make(map[string]string),
 		QuotaLimits: make(map[string]string),
 	}
 
-	pods, err := dm.kubeClient.CoreV1().Pods(p.Namespace).List(ctx, metav1.ListOptions{})
+	pods, err := dm.kubeClient.CoreV1().Pods(targetNamespace).List(ctx, metav1.ListOptions{
+		LabelSelector: labelSelector,
+	})
 	if err != nil {
-		return nil, fmt.Errorf("error listando pods en %s: %w", p.Namespace, err)
+		return nil, fmt.Errorf("error listando pods en %s: %w", targetNamespace, err)
 	}
 
 	metrics.PodsCount = len(pods.Items)
@@ -417,7 +436,7 @@ func (dm *DeployManager) GetProjectMetrics(ctx context.Context, p storage.Projec
 
 	rawMetricsMap := make(map[string]map[string]ContainerMetricInfo)
 	if dm.kubeClient.Discovery() != nil && dm.kubeClient.Discovery().RESTClient() != nil {
-		rawBytes, errRaw := dm.kubeClient.Discovery().RESTClient().Get().AbsPath("/apis/metrics.k8s.io/v1beta1/namespaces/" + p.Namespace + "/pods").DoRaw(ctx)
+		rawBytes, errRaw := dm.kubeClient.Discovery().RESTClient().Get().AbsPath("/apis/metrics.k8s.io/v1beta1/namespaces/" + targetNamespace + "/pods").DoRaw(ctx)
 		if errRaw == nil && len(rawBytes) > 0 {
 			var rml rawMetricList
 			if json.Unmarshal(rawBytes, &rml) == nil {
@@ -470,7 +489,7 @@ func (dm *DeployManager) GetProjectMetrics(ctx context.Context, p storage.Projec
 		metrics.Pods = append(metrics.Pods, podInfo)
 	}
 
-	quotas, errQ := dm.kubeClient.CoreV1().ResourceQuotas(p.Namespace).List(ctx, metav1.ListOptions{})
+	quotas, errQ := dm.kubeClient.CoreV1().ResourceQuotas(targetNamespace).List(ctx, metav1.ListOptions{})
 	if errQ == nil && len(quotas.Items) > 0 {
 		q := quotas.Items[0]
 		for k, v := range q.Status.Used {
