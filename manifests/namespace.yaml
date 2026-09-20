@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: deployer
+  labels:
+    app.kubernetes.io/name: sammcore-deployer
+    app.kubernetes.io/part-of: sammcore

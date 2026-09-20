@@ -1,91 +1,100 @@
 # 📄 Roadmap de Implementación – SAMMCORE Deployer
 
-Este documento define la trayectoria evolutiva y el estado de avance de `sammcore-deployer`, desde los prototipos iniciales hasta la orquestación autónoma en el clúster SAMMCORE.
+Este documento define la trayectoria técnica del proyecto, contrastando el estado real actual contra los hitos de entrega y sus criterios de aceptación.
 
 ---
 
 ## 🟢 Fase 1: MVP Backend + CLI (✅ Completada)
-🎯 Objetivo: backend funcional con capacidad de inspeccionar repositorios y detectar su naturaleza.
+🎯 Objetivo: Módulo base en Go para clonar e identificar el tipo de proyecto.
 
 ### Tareas
-- [x] Inicializar `backend/` en Go con dependencias Go modules.
-- [x] Implementar módulo `RepoManager`:
-  - Clonar repositorios GitHub (`go-git` / git nativo).
-  - Detectar si contiene `docker-compose.yml`, `Dockerfile` o código estático.
-- [x] CLI de validación con salida JSON estructurada.
+- [x] Estructura inicial en Go con Go Modules.
+- [x] Módulo `RepoManager` con soporte para clonado superficial (`depth: 1`) vía `go-git`.
+- [x] Detección inicial de `docker-compose.yml` y `Dockerfile`.
+- [x] Pruebas unitarias en `backend/services/repo_manager_test.go`.
 
 ---
 
 ## 🟢 Fase 2: Backend REST API (✅ Completada)
-🎯 Objetivo: exponer las capacidades de análisis e histórico a través de endpoints HTTP.
-
-### Endpoints
-- [x] `GET /health` → verificación de liveness y readiness del backend.
-- [x] `POST /analyzeRepo` → análisis en tiempo real de repo y branch con detección de tipo.
-- [x] `GET /history` → catálogo persistido de proyectos inspeccionados.
-- [x] `DELETE /history/:id` → limpieza de entradas en el historial.
-
----
-
-## 🟢 Fase 3: Frontend React/Vite (✅ Completada)
-🎯 Objetivo: interfaz web intuitiva para interactuar con el orquestador.
+🎯 Objetivo: Exposición HTTP de la lógica de análisis y registro.
 
 ### Tareas
-- [x] Crear aplicación `frontend/` con Vite, React y TypeScript.
-- [x] Pantalla **Registrar Proyecto**: formulario de URL y rama con botón de análisis reactivo.
-- [x] Pantalla **Estado de Proyectos**: tabla dinámica con badges de estado y acciones.
-- [x] Enrutamiento SPA y cliente HTTP configurado con variables de entorno (`VITE_API_BASE`).
+- [x] Router con Gorilla Mux y middleware de CORS.
+- [x] Endpoint `GET /health` y `GET /metrics` para Prometheus.
+- [x] Endpoint `POST /api/analyzeRepo` con detección de repositorios.
+- [x] Endpoints iniciales de historial (`GET /history`, `DELETE /history/{id}`).
 
 ---
 
-## 🟡 Fase 4: Orquestación K3s y Supabase Modelo A (🔄 En Progreso)
-🎯 Objetivo: ejecutar despliegues reales autónomos en el clúster SAMMCORE con base de datos horizontal y subdominios dinámicos.
+## 🟢 Fase 3: Frontend React / Vite (✅ Completada)
+🎯 Objetivo: Interfaz gráfica para desarrolladores en `https://deployer.sammcore.local`.
 
-### Hitos de la Fase 4:
-- [ ] **Hito 4.1: DatabaseManager (Supabase Modelo A)**
-  - Conexión administrativa interna a `postgres.supabase.svc.cluster.local:5432`.
-  - Aprovisionamiento idempotente de `<proyecto>_db` y rol `<proyecto>_user`.
-  - Generación de contraseñas seguras en memoria y asignación estricta de permisos.
-  - Validación de visibilidad en **Supabase Studio** (`https://supabase.sammcore.local`).
-- [ ] **Hito 4.2: SecretManager**
-  - Generación de objetos `Secret` en Kubernetes directamente desde credenciales en memoria.
-  - Cero contraseñas en texto plano en Git o disco.
-  - Formato estandarizado de variables (`DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, `DB_PASSWORD`, `DATABASE_URL`).
-- [ ] **Hito 4.3: IngressManager y Subdominios Dinámicos**
-  - Configuración automática de reglas de Ingress en `ingress-nginx` (`NodePort: 30080`).
-  - Soporte para múltiples subdominios por proyecto (ej. `sitio.sammcore.local` para Frontend y `api.sitio.sammcore.local` para Backend API).
-  - Uso del certificado TLS comodín central (`sammcore-tls`).
-- [ ] **Hito 4.4: DeployManager & Endpoint `POST /deploy`**
-  - Ensamblado de manifiestos (`Namespace`, `Deployment`, `Service`, `Ingress`, `Secret`).
-  - Aplicación al clúster K3s usando `client-go`.
-  - Monitoreo del rollout y verificación del estado `Running`.
-- [ ] **Hito 4.5: Despliegue Piloto Backroom**
-  - Despliegue integral de `https://github.com/a81Biz/backroom`.
-  - Validación de endpoints:
-    - Web UI: `https://backroom.sammcore.local`
-    - API REST: `https://api.backroom.sammcore.local/products`
-    - Base de Datos: Tablas creadas e inspeccionables en Supabase Studio.
+### Tareas
+- [x] Aplicación SPA con React, TypeScript y Vite.
+- [x] Vista **Registrar Proyecto** (formulario reactivo de análisis).
+- [x] Vista **Estado de Proyectos** (tabla de proyectos registrados).
+- [x] Integración de variables de entorno (`VITE_API_BASE=/api`).
+
+---
+
+## 🟡 Fase 4: Orquestación K3s y Supabase Modelo A (🔄 En Desarrollo)
+🎯 Objetivo: Ejecutar despliegues autónomos completos en el clúster SAMMCORE con base de datos horizontal y subdominios dinámicos.
+
+### 🔹 Hito 4.1: DatabaseManager (Supabase Modelo A)
+* **Objetivo:** Conexión interna a `postgres.supabase.svc.cluster.local:5432` con usuario `postgres`.
+* **Criterios de Aceptación:**
+  1. Aprovisionamiento idempotente: Si `<proyecto>_db` no existe, se ejecuta `CREATE DATABASE "<proyecto>_db"`.
+  2. Si `<proyecto>_user` no existe, se crea con contraseña criptográfica y se asignan permisos exclusivos sobre `<proyecto>_db`.
+  3. Si la base o rol ya existen (redeploy), la función es idempotente y no altera contraseñas existentes.
+  4. Métricas de la base de datos se registran en `postgres-exporter` y son visibles en Grafana.
+
+### 🔹 Hito 4.2: SecretManager e Idempotencia
+* **Objetivo:** Creación segura de objetos `Secret` en Kubernetes desde memoria.
+* **Criterios de Aceptación:**
+  1. Si `<proyecto>-db-secrets` ya existe en K8s, recupera la contraseña existente para evitar desincronizar la BD.
+  2. Si no existe, crea el objeto `Secret` en el namespace `<proyecto>` con `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, `DB_PASSWORD` y `DATABASE_URL`.
+  3. Cero contraseñas en texto plano en Git o logs.
+
+### 🔹 Hito 4.3: TemplateManager e Ingress Dinámico
+* **Objetivo:** Renderizar manifiestos para los 3 arquetipos (`compose-multi-service`, `single-dockerfile`, `static-web`).
+* **Criterios de Aceptación:**
+  1. Nombres sanitizados bajo RFC 1123 y filtrados contra la lista de nombres reservados.
+  2. Ingress genera reglas sin bloque `tls` interno (la terminación SSL la realiza el NGINX del host en `*.sammcore.local`).
+  3. Para Compose multi-servicio: genera regla para `{{ .projectName }}.sammcore.local` (Web) y `api.{{ .projectName }}.sammcore.local` (API).
+
+### 🔹 Hito 4.4: DeployManager y Endpoint `POST /api/deploy`
+* **Objetivo:** Aplicar los manifiestos al clúster K3s y monitorear el rollout.
+* **Criterios de Aceptación:**
+  1. Creación de `Namespace`, `ResourceQuota` (2 CPU, 2Gi RAM) y `NetworkPolicy`.
+  2. Aplicación de `Deployments`, `Services` y `Ingress` mediante `client-go`.
+  3. Espera activa hasta que los pods alcancen el estado `Running` o reporten `CrashLoopBackOff` con timeout.
+
+### 🔹 Hito 4.5: Despliegue Piloto Backroom de Punta a Punta
+* **Objetivo:** Desplegar exitosamente `https://github.com/a81Biz/backroom`.
+* **Criterios de Aceptación:**
+  1. Frontend accesible en `https://backroom.sammcore.local`.
+  2. Backend API accesible en `https://api.backroom.sammcore.local/products`.
+  3. Base de datos `backroom_db` conectada y funcional en PostgreSQL central.
 
 ---
 
 ## 🟢 Fase 5: CI/CD y Auto-Despliegue del Deployer (✅ Completada)
-🎯 Objetivo: empaquetar y alojar el propio `sammcore-deployer` dentro del clúster K3s.
+🎯 Objetivo: Empaquetar y alojar el propio deployer dentro de K3s.
 
 ### Tareas
-- [x] Dockerfile optimizado para `backend` (Go binario ligero) y `frontend` (NGINX estático).
-- [x] Manifiestos declarativos en `manifests/` (`backend.yaml`, `frontend.yaml`, `ingress.yaml`).
-- [x] Despliegue en `namespace: deployer` dentro de K3s.
-- [x] Exposición enrutada por Ingress en `https://deployer.sammcore.local`.
+- [x] Dockerfile multi-stage para `backend` (Go binario ligero sobre Alpine).
+- [x] Dockerfile multi-stage para `frontend` (React/Vite servido por NGINX).
+- [x] Manifiestos declarativos en `manifests/`: `namespace.yaml`, `rbac.yaml`, `backend.yaml`, `frontend.yaml`, `ingress.yaml`.
+- [x] Workflow `.github/workflows/deploy.yml` para compilar y empujar a GHCR en la rama `master`.
+- [x] Enrutamiento activo en `https://deployer.sammcore.local` (vía Ingress `/` y `/api`).
 
 ---
 
 ## ⚪ Fase 6: Panel Avanzado y Observabilidad (Pendiente)
-🎯 Objetivo: herramientas avanzadas de administración, métricas y ciclo de vida.
+🎯 Objetivo: Herramientas de administración avanzada y ciclo de vida.
 
 ### Tareas
-- [ ] Streaming de logs en vivo desde pods de K8s hacia la UI.
-- [ ] Dashboard de métricas en Grafana para despliegues (vía `/metrics` en el backend).
-- [ ] Opción en UI para desmantelar proyectos (`DELETE /project/:id`) con selector de:
-  - *Conservar base de datos para auditoría*.
-  - *Eliminar base de datos permanentemente*.
-- [ ] Autenticación de acceso al panel deployer.
+- [ ] Streaming de logs en vivo desde pods hacia la UI (`GET /api/projects/:id/logs`).
+- [ ] Dashboard dedicado en Grafana con métricas exportadas por `/metrics`.
+- [ ] Eliminación selectiva en UI (`DELETE /api/projects/:id?delete_db=true|false`).
+- [ ] Integración de autenticación Bearer Token en la UI.

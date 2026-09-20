@@ -11,6 +11,13 @@ spec:
     - host: deployer.sammcore.local
       http:
         paths:
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: deployer-backend
+                port:
+                  number: 8080
           - path: /
             pathType: Prefix
             backend:
