@@ -65,7 +65,7 @@ func generateID() string {
 	return hex.EncodeToString(b)
 }
 
-func deriveDeterministicID(repoURL string) string {
+func DeriveDeterministicID(repoURL string) string {
 	cleanURL := strings.ToLower(strings.TrimSpace(repoURL))
 	cleanURL = strings.TrimSuffix(cleanURL, ".git")
 	cleanURL = strings.TrimPrefix(cleanURL, "https://github.com/")
@@ -180,7 +180,7 @@ func Analyze(req AnalyzeRequest) AnalyzeResponse {
 		resolvedBranch = branch
 	}
 
-	projectID := deriveDeterministicID(repoNormalized)
+	projectID := DeriveDeterministicID(repoNormalized)
 	domain := fmt.Sprintf("%s.sammcore.local", projectName)
 	var apiDomain string
 

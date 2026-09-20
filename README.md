@@ -40,7 +40,7 @@ Las especificaciones arquitectónicas y operativas se dividen en los siguientes 
 | **Fase 1: MVP Backend** | Detección de arquetipos y pruebas unitarias de clonado | ✅ Completada |
 | **Fase 2: Backend REST API** | Endpoints HTTP `/api/analyzeRepo`, `/api/health`, `/metrics` | ✅ Completada |
 | **Fase 3: Frontend Inicial** | Interfaz React/Vite en `https://deployer.sammcore.local` | ✅ Completada |
-| **Hito 4.0: Alineación Contrato** | Prefijo `/api`, auth middleware, CORS estricto, static y struct ampliado | ✅ Completado |
-| **Hitos 4.1 a 4.5: Orquestación K3s** | `DatabaseManager`, `SecretManager`, `TemplateManager` y piloto Backroom | 🔄 En Desarrollo |
+| **Hitos 4.1 a 4.4: Orquestación K3s** | `DatabaseManager`, `SecretManager`, `TemplateManager`, `DeployManager` | ✅ Completados |
+| **Hito 4.5: Piloto Backroom** | Despliegue piloto de Backroom de punta a punta | 🔄 En Curso |
 | **Fase 5: Manifiestos y Dockerfiles** | Dockerfiles multi-stage, manifiestos K8s (`namespace`, `builds-namespace`, `rbac`, `pvc`, `ingress`) | ✅ En Repo |
 | **Fase 6: Panel Avanzado** | Streaming de logs, dashboards en Grafana y eliminación selectiva en UI | ⚪ Pendiente |

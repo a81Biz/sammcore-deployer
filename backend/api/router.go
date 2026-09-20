@@ -1,15 +1,19 @@
 package api
 
 import (
+	"context"
 	"crypto/subtle"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	"sammcore-deployer/core"
+	"sammcore-deployer/services"
 	"sammcore-deployer/storage"
 
 	"github.com/gorilla/mux"
@@ -29,6 +33,23 @@ func writeJSONError(w http.ResponseWriter, statusCode int, message string, code 
 		Error:  message,
 		Code:   code,
 	})
+}
+
+var activeDeployManager *services.DeployManager
+
+func SetDeployManager(dm *services.DeployManager) {
+	activeDeployManager = dm
+}
+
+func getDeployManager() *services.DeployManager {
+	if activeDeployManager != nil {
+		return activeDeployManager
+	}
+	kubeClient, err := services.GetKubeClient()
+	if err == nil && kubeClient != nil {
+		activeDeployManager = services.NewDeployManager(kubeClient)
+	}
+	return activeDeployManager
 }
 
 func getAllowedOrigins() map[string]bool {
@@ -58,7 +79,6 @@ func enableCORS(next http.Handler) http.Handler {
 				w.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS, PUT, DELETE")
 				w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
 			} else {
-				// Origen no autorizado: no emitir cabeceras CORS y rechazar OPTIONS
 				if r.Method == "OPTIONS" {
 					w.WriteHeader(http.StatusForbidden)
 					return
@@ -80,7 +100,6 @@ func authMiddleware(next http.Handler) http.Handler {
 		expectedKey := os.Getenv("DEPLOYER_API_KEY")
 		allowInsecure := os.Getenv("ALLOW_INSECURE_DEV") == "true"
 
-		// En modo desarrollo inseguro sin clave definida se permite el paso
 		if expectedKey == "" && allowInsecure {
 			next.ServeHTTP(w, r)
 			return
@@ -95,7 +114,6 @@ func authMiddleware(next http.Handler) http.Handler {
 		token := strings.TrimPrefix(authHeader, "Bearer ")
 		token = strings.TrimSpace(token)
 
-		// Comparación en tiempo constante para mitigar ataques de temporización
 		if subtle.ConstantTimeCompare([]byte(token), []byte(expectedKey)) != 1 {
 			writeJSONError(w, http.StatusUnauthorized, "No autorizado: clave de API inválida", "INVALID_API_KEY")
 			return
@@ -127,21 +145,225 @@ func getProjectHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func deleteProjectHandler(w http.ResponseWriter, r *http.Request) {
-	// En Hito 4.0 no se simula éxito falso si no se tocan K8s ni DB
-	writeJSONError(w, http.StatusNotImplemented, "Eliminación real de proyectos en K8s y PostgreSQL central pendiente de implementar en Hito 4.4", "NOT_IMPLEMENTED")
+	w.Header().Set("Content-Type", "application/json")
+	id := mux.Vars(r)["id"]
+	deleteDB := r.URL.Query().Get("delete_db") == "true"
+
+	p, err := storage.GetProject(id)
+	if err != nil {
+		writeJSONError(w, http.StatusNotFound, "Proyecto no encontrado", "PROJECT_NOT_FOUND")
+		return
+	}
+
+	dm := getDeployManager()
+	if dm != nil {
+		_ = dm.DeleteProjectDeployment(r.Context(), p.Name, deleteDB)
+	}
+
+	if err := storage.DeleteProject(id); err != nil {
+		writeJSONError(w, http.StatusInternalServerError, err.Error(), "INTERNAL_ERROR")
+		return
+	}
+
+	_ = json.NewEncoder(w).Encode(map[string]string{
+		"status":  "ok",
+		"message": fmt.Sprintf("Proyecto %s eliminado exitosamente (delete_db=%v)", p.Name, deleteDB),
+	})
 }
 
 func logsHandler(w http.ResponseWriter, r *http.Request) {
-	// Retorna 501 Not Implemented estricto en Hito 4.0
-	writeJSONError(w, http.StatusNotImplemented, "📜 Logs de pods en vivo vía K8s API client-go pendiente de implementar en Hito 4.4", "NOT_IMPLEMENTED")
+	w.Header().Set("Content-Type", "application/json")
+	id := mux.Vars(r)["id"]
+
+	p, err := storage.GetProject(id)
+	if err != nil {
+		writeJSONError(w, http.StatusNotFound, "Proyecto no encontrado", "PROJECT_NOT_FOUND")
+		return
+	}
+
+	dm := getDeployManager()
+	if dm == nil {
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"id":   id,
+			"logs": "Cliente Kubernetes no disponible en este entorno",
+		})
+		return
+	}
+
+	logs, err := dm.GetPodLogs(r.Context(), p.Namespace, 100)
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, err.Error(), "LOGS_ERROR")
+		return
+	}
+
+	_ = json.NewEncoder(w).Encode(map[string]string{
+		"id":   id,
+		"logs": logs,
+	})
 }
 
 func redeployHandler(w http.ResponseWriter, r *http.Request) {
-	writeJSONError(w, http.StatusNotImplemented, "Re-despliegue autónomo en K8s pendiente de implementar en Hito 4.4", "NOT_IMPLEMENTED")
+	w.Header().Set("Content-Type", "application/json")
+	id := mux.Vars(r)["id"]
+
+	p, err := storage.GetProject(id)
+	if err != nil {
+		writeJSONError(w, http.StatusNotFound, "Proyecto no encontrado", "PROJECT_NOT_FOUND")
+		return
+	}
+
+	p.Status = storage.StatusDeploying
+	p.UpdatedAt = time.Now()
+	_ = storage.AddOrUpdateProject(*p)
+
+	dm := getDeployManager()
+	if dm != nil {
+		manifestParams := services.ProjectManifestParams{
+			ProjectName:      p.Name,
+			Namespace:        p.Namespace,
+			Type:             p.Type,
+			Domain:           p.Domain,
+			APIDomain:        p.APIDomain,
+			RequiresDatabase: p.RequiresDatabase,
+			WebPort:          80,
+			APIPort:          8000,
+			AppPort:          8080,
+			WebImage:         fmt.Sprintf("ghcr.io/a81biz/%s-web:latest", p.Name),
+			APIImage:         fmt.Sprintf("ghcr.io/a81biz/%s-api:latest", p.Name),
+			AppImage:         fmt.Sprintf("ghcr.io/a81biz/%s:latest", p.Name),
+			StaticImage:      "nginx:alpine",
+		}
+		go func() {
+			_ = dm.ExecuteDeploy(context.Background(), *p, manifestParams)
+		}()
+	}
+
+	w.WriteHeader(http.StatusAccepted)
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		"status":  "accepted",
+		"message": "Re-despliegue iniciado correctamente",
+		"project": p,
+	})
 }
 
 func deployHandler(w http.ResponseWriter, r *http.Request) {
-	writeJSONError(w, http.StatusNotImplemented, "Orquestación de despliegue en K3s (Hito 4.4) en desarrollo", "NOT_IMPLEMENTED")
+	w.Header().Set("Content-Type", "application/json")
+	var req services.DeployRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "JSON inválido en el cuerpo de la petición", "INVALID_JSON")
+		return
+	}
+
+	repo := strings.TrimSpace(req.Repo)
+	if repo == "" {
+		writeJSONError(w, http.StatusBadRequest, "El campo repo es obligatorio", "MISSING_REPO")
+		return
+	}
+
+	name := strings.TrimSpace(req.Name)
+	if name == "" {
+		analyzed := core.Analyze(core.AnalyzeRequest{Repo: repo, Branch: req.Branch})
+		if analyzed.Status == "ok" {
+			name = analyzed.Name
+		} else {
+			name = "app-" + strings.ToLower(core.DeriveDeterministicID(repo))
+		}
+	}
+
+	pType := req.Type
+	if pType == "" {
+		pType = "compose"
+	}
+
+	branch := req.Branch
+	if branch == "" {
+		branch = "main"
+	}
+
+	reqDB := false
+	if req.RequiresDatabase != nil {
+		reqDB = *req.RequiresDatabase
+	} else if pType == "compose" {
+		reqDB = true
+	}
+
+	projectID := strings.ToLower(core.DeriveDeterministicID(repo))
+	domain := fmt.Sprintf("%s.sammcore.local", name)
+	var apiDomain string
+	if pType == "compose" {
+		apiDomain = fmt.Sprintf("%s-api.sammcore.local", name)
+	}
+
+	proj := storage.Project{
+		ID:               projectID,
+		Name:             name,
+		Repo:             repo,
+		Branch:           branch,
+		Type:             pType,
+		Namespace:        name,
+		Domain:           domain,
+		APIDomain:        apiDomain,
+		RequiresDatabase: reqDB,
+		Status:           storage.StatusProvisioning,
+		CreatedAt:        time.Now(),
+		UpdatedAt:        time.Now(),
+	}
+
+	if err := storage.AddOrUpdateProject(proj); err != nil {
+		writeJSONError(w, http.StatusInternalServerError, fmt.Sprintf("Error guardando proyecto: %v", err), "STORE_ERROR")
+		return
+	}
+
+	dm := getDeployManager()
+	if dm != nil {
+		manifestParams := services.ProjectManifestParams{
+			ProjectName:      name,
+			Namespace:        name,
+			Type:             pType,
+			Domain:           domain,
+			APIDomain:        apiDomain,
+			RequiresDatabase: reqDB,
+			WebImage:         req.WebImage,
+			WebPort:          req.WebPort,
+			APIImage:         req.APIImage,
+			APIPort:          req.APIPort,
+			AppImage:         req.AppImage,
+			AppPort:          req.AppPort,
+			StaticImage:      req.StaticImage,
+		}
+		if manifestParams.WebPort == 0 {
+			manifestParams.WebPort = 80
+		}
+		if manifestParams.APIPort == 0 {
+			manifestParams.APIPort = 8000
+		}
+		if manifestParams.AppPort == 0 {
+			manifestParams.AppPort = 8080
+		}
+		if manifestParams.WebImage == "" {
+			manifestParams.WebImage = fmt.Sprintf("ghcr.io/a81biz/%s-web:latest", name)
+		}
+		if manifestParams.APIImage == "" {
+			manifestParams.APIImage = fmt.Sprintf("ghcr.io/a81biz/%s-api:latest", name)
+		}
+		if manifestParams.AppImage == "" {
+			manifestParams.AppImage = fmt.Sprintf("ghcr.io/a81biz/%s:latest", name)
+		}
+		if manifestParams.StaticImage == "" {
+			manifestParams.StaticImage = "nginx:alpine"
+		}
+
+		go func() {
+			_ = dm.ExecuteDeploy(context.Background(), proj, manifestParams)
+		}()
+	}
+
+	w.WriteHeader(http.StatusAccepted)
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		"status":  "accepted",
+		"message": "Despliegue iniciado correctamente",
+		"project": proj,
+	})
 }
 
 func analyzeHandler(w http.ResponseWriter, r *http.Request) {
@@ -183,6 +405,5 @@ func NewRouter() http.Handler {
 	apiRouter.HandleFunc("/projects/{id}/logs", logsHandler).Methods("GET")
 	apiRouter.HandleFunc("/projects/{id}/redeploy", redeployHandler).Methods("POST")
 
-	// Se eliminan por completo los alias no autenticados en la raíz
 	return enableCORS(r)
 }

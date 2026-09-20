@@ -38,11 +38,11 @@ func TestSanitizeProjectName(t *testing.T) {
 }
 
 func TestDeriveDeterministicID(t *testing.T) {
-	id1 := deriveDeterministicID("https://github.com/a81Biz/sammcore-deployer.git")
-	id2 := deriveDeterministicID("https://github.com/a81biz/sammcore-deployer")
+	id1 := DeriveDeterministicID("https://github.com/a81Biz/sammcore-deployer.git")
+	id2 := DeriveDeterministicID("https://github.com/a81biz/sammcore-deployer")
 
 	if id1 != "a81biz-sammcore-deployer" {
-		t.Errorf("deriveDeterministicID expected a81biz-sammcore-deployer, got %s", id1)
+		t.Errorf("DeriveDeterministicID expected a81biz-sammcore-deployer, got %s", id1)
 	}
 	if id1 != id2 {
 		t.Errorf("expected deterministic IDs to match: %s != %s", id1, id2)

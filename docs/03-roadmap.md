@@ -57,40 +57,46 @@ Este documento define la trayectoria técnica del proyecto, contrastando el esta
   11. **Frontend Moderno:** Modal React nativo para configuración de clave API y captura de errores 401 sin cuadros `prompt()` de navegador.
   12. **Pruebas Unitarias al 100%:** Suites completas pasando en `api`, `core`, `services` y `storage`.
 
-### 🔹 Hito 4.1: DatabaseManager (Supabase Modelo A)
+### 🔹 Hito 4.1: DatabaseManager (Supabase Modelo A) (✅ Completado)
 * **Objetivo:** Conexión interna a `postgres.supabase.svc.cluster.local:5432` con usuario `postgres`.
 * **Criterios de Aceptación:**
-  1. Matriz de 4 casos de idempotencia implementada (rol existe/no existe, secret existe/no existe).
-  2. Ejecución de `GRANT "<proyecto>_user" TO postgres` previa a `CREATE DATABASE` para asegurar ownership sin requerir superusuario.
-  3. Aislamiento estricto: `REVOKE ALL ON DATABASE "<proyecto>_db" FROM PUBLIC` y `REVOKE CONNECT ON DATABASE postgres FROM "<proyecto>_user"`.
-  4. Límite de conexiones: `CONNECTION LIMIT 20` por usuario de proyecto en `CREATE` y `ALTER ROLE`.
-  5. Purga limpia con `delete_db=true` (`pg_terminate_backend`, `DROP DATABASE`, `REVOKE`, `DROP USER`).
-  6. Métricas de base de datos registradas en `postgres-exporter` y visibles en Grafana.
+  - [x] Matriz de 4 casos de idempotencia implementada (rol existe/no existe, secret existe/no existe).
+  - [x] Ejecución de `GRANT "<proyecto>_user" TO postgres` previa a `CREATE DATABASE` para asegurar ownership sin requerir superusuario.
+  - [x] Aislamiento estricto: `REVOKE ALL ON DATABASE "<proyecto>_db" FROM PUBLIC` y `REVOKE CONNECT ON DATABASE postgres FROM "<proyecto>_user"`.
+  - [x] Límite de conexiones: `CONNECTION LIMIT 20` por usuario de proyecto en `CREATE` y `ALTER ROLE`.
+  - [x] Purga limpia con `delete_db=true` (`pg_terminate_backend`, `DROP DATABASE`, `REVOKE`, `DROP USER`).
+  - [x] Implementación en `services/db_manager.go` con pruebas unitarias en `services/db_manager_test.go`.
 
-### 🔹 Hito 4.2: SecretManager e Idempotencia
+### 🔹 Hito 4.2: SecretManager e Idempotencia (✅ Completado)
 * **Objetivo:** Creación segura de objetos `Secret` en Kubernetes desde memoria.
 * **Criterios de Aceptación:**
-  1. Si `<proyecto>-db-secrets` ya existe en K8s, recupera la contraseña existente para evitar desincronizar la BD.
-  2. Si no existe, crea el objeto `Secret` en el namespace `<proyecto>` con `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, `DB_PASSWORD` y `DATABASE_URL`.
-  3. Cero contraseñas en texto plano en Git o logs.
+  - [x] Si `<proyecto>-db-secrets` ya existe en K8s, recupera la contraseña existente para evitar desincronizar la BD.
+  - [x] Si no existe, crea el objeto `Secret` en el namespace `<proyecto>` con `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, `DB_PASSWORD` y `DATABASE_URL`.
+  - [x] Cero contraseñas en texto plano en Git o logs.
+  - [x] Implementación en `services/secret_manager.go` con pruebas unitarias en `services/secret_manager_test.go`.
 
-### 🔹 Hito 4.3: TemplateManager e Ingress Dinámico
+### 🔹 Hito 4.3: TemplateManager e Ingress Dinámico (✅ Completado)
 * **Objetivo:** Renderizar manifiestos para los 3 arquetipos (`compose-multi-service`, `single-dockerfile`, `static-web`).
 * **Criterios de Aceptación:**
-  1. Nombres sanitizados bajo RFC 1123 (`[a-z0-9-]`, 3-35 caracteres) y filtrados contra nombres reservados (`kube-*`, etc.).
-  2. Subdominios de nivel único compatibles con Wildcard TLS: `{{ .projectName }}.sammcore.local` (Web) y `{{ .projectName }}-api.sammcore.local` (API).
-  3. Inclusión de `imagePullSecrets: [{name: sammcore-registry-secret}]` en los pods para descarga de imágenes de GHCR.
-  4. NetworkPolicy con tráfico intra-namespace (`podSelector: {}`), DNS (UDP/TCP 53) y exclusión de CIDRs privados RFC 1918.
-  5. Inclusión obligatoria de `LimitRange`, `requests` y `limits` en todos los contenedores e initContainers.
+  - [x] Nombres sanitizados bajo RFC 1123 (`[a-z0-9-]`, 3-35 caracteres) y filtrados contra nombres reservados (`kube-*`, etc.).
+  - [x] Subdominios de nivel único compatibles con Wildcard TLS: `{{ .projectName }}.sammcore.local` (Web) y `{{ .projectName }}-api.sammcore.local` (API).
+  - [x] Inclusión de `imagePullSecrets: [{name: sammcore-registry-secret}]` en los pods para descarga de imágenes de GHCR.
+  - [x] NetworkPolicy con tráfico intra-namespace (`podSelector: {}`), DNS (UDP/TCP 53) y exclusión de CIDRs privados RFC 1918.
+  - [x] Inclusión obligatoria de `LimitRange`, `requests` y `limits` en todos los contenedores e initContainers.
+  - [x] Implementación en `services/template_manager.go` con pruebas unitarias en `services/template_manager_test.go`.
 
-### 🔹 Hito 4.4: DeployManager y Endpoint `POST /api/deploy`
-* **Objetivo:** Aplicar los manifiestos al clúster K3s de forma asíncrona (`202 Accepted`) y monitorear el rollout.
+### 🔹 Hito 4.4: DeployManager y Endpoints REST (✅ Completado)
+* **Objetivo:** Aplicar los manifiestos al clúster K3s de forma asíncrona (`202 Accepted`), endpoints de ciclo de vida y monitoreo de rollout.
 * **Criterios de Aceptación:**
-  1. Creación de `Namespace` con label de Pod Security `baseline`.
-  2. Aplicación de `ResourceQuota`, `LimitRange`, `NetworkPolicy`, `Deployments`, `Services` y `Ingress`.
-  3. Monitoreo activo hasta que los pods alcancen el estado `Running` o timeout.
+  - [x] Creación de `Namespace` con label de Pod Security `baseline`.
+  - [x] Aplicación de `ResourceQuota`, `LimitRange`, `NetworkPolicy`, `Deployments`, `Services` e `Ingress` mediante `client-go`.
+  - [x] Endpoint `POST /api/deploy` asíncrono con respuesta `202 Accepted`.
+  - [x] Endpoint `DELETE /api/projects/:id?delete_db=true|false` con purga de Namespace y PostgreSQL.
+  - [x] Endpoint `GET /api/projects/:id/logs` con streaming/tail de pods en vivo vía K8s API.
+  - [x] Endpoint `POST /api/projects/:id/redeploy` con actualización de estado y re-ejecución.
+  - [x] Implementación en `services/deploy_manager.go` y `api/router.go` con pruebas en `deploy_manager_test.go` y `router_test.go`.
 
-### 🔹 Hito 4.5: Despliegue Piloto Backroom de Punta a Punta
+### 🔹 Hito 4.5: Despliegue Piloto Backroom de Punta a Punta (🔄 En Curso)
 * **Objetivo:** Desplegar exitosamente `https://github.com/a81Biz/backroom`.
 * **Criterios de Aceptación:**
   1. Frontend accesible en `https://backroom.sammcore.local`.

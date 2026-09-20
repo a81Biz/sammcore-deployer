@@ -1,11 +1,17 @@
 package api
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"testing"
+
+	"k8s.io/client-go/kubernetes/fake"
+
+	"sammcore-deployer/services"
+	"sammcore-deployer/storage"
 )
 
 func TestHealthCheck(t *testing.T) {
@@ -73,40 +79,96 @@ func TestCORS_DisallowedOrigin(t *testing.T) {
 	}
 }
 
-func TestNotImplementedEndpoints(t *testing.T) {
+func TestDeployAndManageEndpoints(t *testing.T) {
 	apiKey := "super-secret-key-123"
 	os.Setenv("DEPLOYER_API_KEY", apiKey)
 	defer os.Unsetenv("DEPLOYER_API_KEY")
 
+	tmpDir, err := os.MkdirTemp("", "test-api-store-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	os.Setenv("DATA_DIR", tmpDir)
+	defer os.Unsetenv("DATA_DIR")
+
+	// Usar mock deploy manager con fake clientset
+	fakeClient := fake.NewSimpleClientset()
+	fakeDM := services.NewDeployManager(fakeClient)
+	SetDeployManager(fakeDM)
+
 	r := NewRouter()
 
-	endpoints := []struct {
-		method string
-		path   string
-	}{
-		{"POST", "/api/deploy"},
-		{"DELETE", "/api/projects/test-proj"},
-		{"GET", "/api/projects/test-proj/logs"},
-		{"POST", "/api/projects/test-proj/redeploy"},
+	// 1. POST /api/deploy (debe responder 202 Accepted)
+	deployBody := []byte(`{
+		"name": "backroom",
+		"repo": "https://github.com/a81Biz/backroom",
+		"branch": "master",
+		"type": "compose",
+		"web_port": 80,
+		"api_port": 8000
+	}`)
+
+	req, _ := http.NewRequest("POST", "/api/deploy", bytes.NewReader(deployBody))
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+
+	r.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusAccepted {
+		t.Fatalf("expected 202 Accepted on /api/deploy, got %v (body: %s)", rr.Code, rr.Body.String())
 	}
 
-	for _, ep := range endpoints {
-		req, _ := http.NewRequest(ep.method, ep.path, nil)
-		req.Header.Set("Authorization", "Bearer "+apiKey)
-		rr := httptest.NewRecorder()
+	// 2. GET /api/projects/:id (debe responder 200)
+	projectID := "a81biz-backroom"
+	req, _ = http.NewRequest("GET", "/api/projects/"+projectID, nil)
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+	rr = httptest.NewRecorder()
 
-		r.ServeHTTP(rr, req)
+	r.ServeHTTP(rr, req)
 
-		if rr.Code != http.StatusNotImplemented {
-			t.Errorf("[%s %s] expected 501 Not Implemented, got %v", ep.method, ep.path, rr.Code)
-		}
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK on GET /api/projects/%s, got %v", projectID, rr.Code)
+	}
 
-		var errResp APIError
-		if err := json.NewDecoder(rr.Body).Decode(&errResp); err != nil {
-			t.Errorf("[%s %s] failed to decode error response: %v", ep.method, ep.path, err)
-		}
-		if errResp.Status != "error" || errResp.Code != "NOT_IMPLEMENTED" {
-			t.Errorf("[%s %s] expected code=NOT_IMPLEMENTED, got %v", ep.method, ep.path, errResp.Code)
-		}
+	// 3. GET /api/projects/:id/logs (debe responder 200)
+	req, _ = http.NewRequest("GET", "/api/projects/"+projectID+"/logs", nil)
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+	rr = httptest.NewRecorder()
+
+	r.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK on GET logs, got %v", rr.Code)
+	}
+
+	// 4. POST /api/projects/:id/redeploy (debe responder 202 Accepted)
+	req, _ = http.NewRequest("POST", "/api/projects/"+projectID+"/redeploy", nil)
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+	rr = httptest.NewRecorder()
+
+	r.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusAccepted {
+		t.Fatalf("expected 202 Accepted on redeploy, got %v", rr.Code)
+	}
+
+	// 5. DELETE /api/projects/:id (debe responder 200 OK)
+	req, _ = http.NewRequest("DELETE", "/api/projects/"+projectID+"?delete_db=false", nil)
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+	rr = httptest.NewRecorder()
+
+	r.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK on delete project, got %v", rr.Code)
+	}
+
+	// 6. Verificar que ya no existe
+	_, err = storage.GetProject(projectID)
+	if err == nil {
+		t.Errorf("expected project to be deleted from storage")
 	}
 }
