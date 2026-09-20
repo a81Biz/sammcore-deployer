@@ -353,8 +353,9 @@ func deployHandler(w http.ResponseWriter, r *http.Request) {
 			APIImage:         req.APIImage,
 			APIPort:          req.APIPort,
 			AppImage:         req.AppImage,
-			AppPort:          req.AppPort,
 			StaticImage:      req.StaticImage,
+			HasCustomEnv:     len(req.BuildArgs) > 0,
+			BuildArgs:        req.BuildArgs,
 		}
 		if manifestParams.WebPort == 0 {
 			manifestParams.WebPort = 80

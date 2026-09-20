@@ -19,8 +19,9 @@ type ProjectManifestParams struct {
 	APIImage         string `json:"api_image,omitempty"`
 	APIPort          int    `json:"api_port,omitempty"`
 	AppImage         string `json:"app_image,omitempty"`
-	AppPort          int    `json:"app_port,omitempty"`
-	StaticImage      string `json:"static_image,omitempty"`
+	StaticImage      string            `json:"static_image,omitempty"`
+	HasCustomEnv     bool              `json:"has_custom_env"`
+	BuildArgs        map[string]string `json:"build_args,omitempty"`
 }
 
 const baseManifestsTemplate = `apiVersion: v1
@@ -211,6 +212,11 @@ spec:
             - secretRef:
                 name: {{ .ProjectName }}-db-secrets
           {{- end }}
+          {{- if .HasCustomEnv }}
+          envFrom:
+            - secretRef:
+                name: {{ .ProjectName }}-env-secrets
+          {{- end }}
           readinessProbe:
             tcpSocket:
               port: {{ .APIPort }}
@@ -333,6 +339,11 @@ spec:
           envFrom:
             - secretRef:
                 name: {{ .ProjectName }}-db-secrets
+          {{- end }}
+          {{- if .HasCustomEnv }}
+          envFrom:
+            - secretRef:
+                name: {{ .ProjectName }}-env-secrets
           {{- end }}
           readinessProbe:
             tcpSocket:

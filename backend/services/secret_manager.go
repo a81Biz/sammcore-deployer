@@ -156,3 +156,36 @@ func (sm *SecretManager) EnsureRegistrySecret(ctx context.Context, targetNamespa
 	}
 	return nil
 }
+
+// EnsureCustomEnvSecret crea o actualiza un Secret con variables de entorno personalizadas del usuario
+func (sm *SecretManager) EnsureCustomEnvSecret(ctx context.Context, namespace, projectName string, envVars map[string]string) error {
+	if len(envVars) == 0 {
+		return nil
+	}
+	secretName := fmt.Sprintf("%s-env-secrets", projectName)
+	sec, err := sm.client.CoreV1().Secrets(namespace).Get(ctx, secretName, metav1.GetOptions{})
+	if err != nil {
+		if errors.IsNotFound(err) {
+			newSecret := &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      secretName,
+					Namespace: namespace,
+					Labels: map[string]string{
+						"app.kubernetes.io/managed-by": "sammcore-deployer",
+						"project":                      projectName,
+					},
+				},
+				Type:       corev1.SecretTypeOpaque,
+				StringData: envVars,
+			}
+			_, err := sm.client.CoreV1().Secrets(namespace).Create(ctx, newSecret, metav1.CreateOptions{})
+			return err
+		}
+		return err
+	}
+
+	sec.StringData = envVars
+	_, err = sm.client.CoreV1().Secrets(namespace).Update(ctx, sec, metav1.UpdateOptions{})
+	return err
+}
+

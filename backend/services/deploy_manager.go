@@ -453,7 +453,22 @@ func (dm *DeployManager) ExecuteDeploy(ctx context.Context, p storage.Project, p
 					return fmt.Errorf("fallo al crear DB secret: %w", err)
 				}
 			}
+	}
+
+	// Si hay variables de entorno personalizadas, asegurar namespace y secreto
+	if params.HasCustomEnv && len(params.BuildArgs) > 0 {
+		nsObj := &corev1.Namespace{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: namespace,
+				Labels: map[string]string{
+					"app.kubernetes.io/managed-by":       "sammcore-deployer",
+					"project":                            projectName,
+					"pod-security.kubernetes.io/enforce": "baseline",
+				},
+			},
 		}
+		_ = dm.applyNamespace(ctx, nsObj)
+		_ = dm.secretManager.EnsureCustomEnvSecret(ctx, namespace, projectName, params.BuildArgs)
 	}
 
 	// 2. Renderizar y aplicar manifiestos
