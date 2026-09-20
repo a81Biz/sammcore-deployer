@@ -50,34 +50,24 @@ flowchart TD
 
 ---
 
-## 2. 📂 Estado Actual vs Estado Objetivo
+## 2. 📂 Estado Operativo del Sistema (Deployer v2 Consolidado)
 
-### Estado Actual en el Repositorio (Hito 4.0 Consolidado):
+El sistema se encuentra **100% implementado, operativo y validado en producción**:
 * **Backend:**  
-  - Prefijo unificado `/api` con middleware de autenticación estricta `Authorization: Bearer <DEPLOYER_API_KEY>` (usando `subtle.ConstantTimeCompare`) y aborto al inicio si no está configurada (salvo `ALLOW_INSECURE_DEV=true`).
-  - Eliminación absoluta de alias no autenticados en el router raíz.
+  - Prefijo unificado `/api` con middleware de autenticación estricta `Authorization: Bearer <DEPLOYER_API_KEY>` (usando `subtle.ConstantTimeCompare`) y aborto al inicio si no está configurada.
   - CORS con lista blanca configurable vía `ALLOWED_ORIGINS` y cabecera `Vary: Origin`.
-  - **Análisis No Persistente:** `POST /api/analyzeRepo` es estrictamente de solo lectura; devuelve un `AnalyzePlan` sin tocar `history.json` ni reiniciar aplicaciones en ejecución.
-  - **Detección YAML Estructurada:** Parseo de `docker-compose.yml`, `docker-compose.yaml`, `compose.yml` y `compose.yaml` mediante `gopkg.in/yaml.v3` para extraer puertos reales de contenedor (target) y dependencias de BD sin falsos positivos por comentarios.
-  - **Clonado Seguro:** Timeout de 2 minutos vía `context.WithTimeout` y rechazo explícito si se solicita una rama específica inexistente (sin fallback silencioso).
-  - **Identificadores Deterministas:** IDs calculados a partir de `owner-repo` y sanitización que previene colisiones con subdominios (`-api`, `-docs`) o nombres reservados.
-  - **Protección contra Corrupción:** Detección de JSON corrupto en `history.json` con respaldo automático en `history.json.corrupt.<timestamp>` y propagación de errores para no sobreescribir datos.
-  - **Stubs 501 Not Implemented:** `/api/deploy`, `/api/projects/{id}` (DELETE), `/api/projects/{id}/logs` y `redeploy` responden 501 con modelo de error uniforme `{"status":"error","error":"...","code":"NOT_IMPLEMENTED"}`.
-  - Pruebas unitarias de router, core analyzer, storage y repo_manager pasando con `go test`.
+  - **Análisis Per-Service (`DetectServicePlan`):** Parseo estructurado de Compose y Dockerfiles mediante `gopkg.in/yaml.v3`. Detecta y extrae cada servicio con su rol (`web`, `api`, `worker`), puerto real del contenedor (`target`) y directorio de build sin falsos positivos.
+  - **Pipeline Kaniko In-Cluster (`build_manager.go`):** Compilación secuencial de imágenes en `deployer-builds` publicando hacia el registro privado local `registry.sammcore-registry.svc.cluster.local:5000`. Caching por commit hash con comprobación de existencia previa para saltar builds innecesarios.
+  - **DatabaseManager (`db_manager.go`):** Matriz de idempotencia de 4 casos en PostgreSQL Supabase (Modelo A), preservación de contraseñas vía `DB_PASSWORD`, aislamiento de privilegios y cuota de 20 conexiones.
+  - **SecretManager (`secret_manager.go`):** Creación y sincronización de `<proyecto>-db-secrets` y `<proyecto>-env-secrets` en Kubernetes sin persistir secretos en texto plano.
+  - **TemplateManager (`template_manager.go`):** Renderizado de Deployments, Services ClusterIP, Ingress dinámico y NetworkPolicy per-service bajo RFC 1123.
+  - **DeployManager (`deploy_manager.go`):** Orquestación asíncrona en 4 pasos (`1/4 Recursos`, `2/4 Kaniko`, `3/4 Despliegue`, `4/4 Operativo`), con monitoreo de rollout y captura de motivos de espera en pods.
+  - **Logs y Métricas Dinámicos:** Streaming en vivo de logs sanitizados (remoción de escapes ANSI y filtrado de ruido APT) y métricas de CPU/RAM/Quota en tiempo real según la fase del proyecto.
 * **Frontend:**  
-  - Consumo de `/api/projects`, captura y almacenamiento de clave API en `localStorage` vía componente modal React integrado en `Navbar` (sin popups `prompt`).
-  - Detección reactiva de errores 401 mediante evento `deployer:auth-required`.
-* **Manifiestos K8s:**  
-  - `rbac.yaml` corregido con `apiGroup: rbac.authorization.k8s.io`.
-  - `backend.yaml` con `strategy: Recreate`, `imagePullPolicy: Always` y límites de `ephemeral-storage`.
-  - `pvc.yaml` creado y aplicado en clúster.
-  - `builds-namespace.yaml` para aislar compilaciones de Kaniko con `ResourceQuota`, `LimitRange` y `NetworkPolicy`.
-
-### Estado Objetivo (Hitos 4.1 a 4.5):
-* `services/db_manager.go`: Conexión administrativa a Supabase PostgreSQL y aprovisionamiento idempotente de 4 casos (Modelo A).
-* `services/secret_manager.go`: Creación en memoria de Kubernetes Secrets vía `client-go`.
-* `services/template_manager.go`: Renderizado de manifiestos con single-level subdomains (`<proyecto>-api.sammcore.local`) y LimitRange.
-* `services/deploy_manager.go`: Orquestador asíncrono que aplica recursos en K3s y reporta estado del rollout.
+  - Consumo reactivo de la API, captura de credenciales mediante modal React, tabla dinámica per-service y visualización de progreso en 4 pasos con métricas y logs en vivo.
+* **Infraestructura K8s:**  
+  - `sammcore-registry` (Docker Registry 2.0 con PVC NVMe 10Gi y NodePort 30500 con espejo en K3s registries.yaml).
+  - `deployer-builds` (Namespace con ResourceQuota de 10Gi RAM / 4 CPUs, LimitRange y NetworkPolicy con salida DNS en puerto 53).
 
 ---
 
@@ -106,11 +96,33 @@ Todos los endpoints mutables requieren el header `Authorization: Bearer <DEPLOYE
   "id": "a81biz-backroom",
   "name": "backroom",
   "type": "compose",
-  "branch": "master",
+  "branch": "main",
   "domain": "backroom.sammcore.local",
   "api_domain": "backroom-api.sammcore.local",
   "requires_database": true,
-  "detected_ports": [80, 8000],
+  "detected_ports": [80, 8080],
+  "services": [
+    {
+      "name": "backend",
+      "role": "api",
+      "port": 8080,
+      "build_context": "./backend",
+      "dockerfile": "Dockerfile"
+    },
+    {
+      "name": "frontend",
+      "role": "web",
+      "port": 80,
+      "build_context": "./frontend",
+      "dockerfile": "Dockerfile"
+    },
+    {
+      "name": "worker",
+      "role": "worker",
+      "build_context": "./worker",
+      "dockerfile": "Dockerfile"
+    }
+  ],
   "evidence": ["docker-compose.yml"]
 }
 ```
@@ -120,14 +132,32 @@ Todos los endpoints mutables requieren el header `Authorization: Bearer <DEPLOYE
 {
   "name": "backroom",
   "repo": "https://github.com/a81Biz/backroom",
-  "branch": "master",
+  "branch": "main",
   "type": "compose",
   "requires_database": true,
-  "web_image": "ghcr.io/a81biz/backroom-web:latest",
-  "api_image": "ghcr.io/a81biz/backroom-api:latest",
-  "web_port": 80,
-  "api_port": 8000,
-  "build_args": {
+  "services": [
+    {
+      "name": "backend",
+      "role": "api",
+      "port": 8080,
+      "build_context": "./backend",
+      "dockerfile": "Dockerfile"
+    },
+    {
+      "name": "frontend",
+      "role": "web",
+      "port": 80,
+      "build_context": "./frontend",
+      "dockerfile": "Dockerfile"
+    },
+    {
+      "name": "worker",
+      "role": "worker",
+      "build_context": "./worker",
+      "dockerfile": "Dockerfile"
+    }
+  ],
+  "env": {
     "VITE_API_BASE": "https://backroom-api.sammcore.local"
   }
 }
@@ -144,9 +174,14 @@ Todos los endpoints mutables requieren el header `Authorization: Bearer <DEPLOYE
 
 ---
 
-## 4. 🐳 Compilación de Imágenes Aislada (Kaniko)
+## 4. 🐳 Compilación de Imágenes Aislada (Kaniko) y Registry Local
 
-Para evitar agotar la `ResourceQuota` de la aplicación durante la compilación, los builds in-cluster de Kaniko se ejecutan en un namespace dedicado: `deployer-builds`:
-* Cuenta con su propia cuota de compilación (hasta 4 CPU y 4Gi RAM delimitados en `manifests/builds-namespace.yaml`).
-* Utiliza el secreto `kaniko-registry-secret` para autenticarse con GHCR.
-* Finalizado el build, el pod de Kaniko es purgado automáticamente mediante `ttlSecondsAfterFinished: 120`.
+Para garantizar la autonomía total del clúster sin depender de servicios externos de CI/CD ni registros públicos externos:
+* **Namespace Dedicado:** Los builds se ejecutan en `deployer-builds` con `ResourceQuota` de 10Gi RAM / 4 CPUs y `NetworkPolicy` que autoriza salida al puerto 53 (DNS UDP/TCP).
+* **Docker Registry Local:** Se ejecuta en el namespace `sammcore-registry` (`registry:2`, PVC de 10Gi NVMe) accesible internamente en `registry.sammcore-registry.svc.cluster.local:5000` y vía NodePort `30500` con mirror en `/etc/rancher/k3s/registries.yaml`.
+* **Optimización y Estabilidad:**
+  - Pods de Kaniko con límite de memoria de **7.5 GiB** (requests 1 GiB) para compilar sin saturación dependencias pesadas de ML (PyTorch/Torchvision).
+  - Flags de alto rendimiento: `--compressed-caching=false` y `--snapshot-mode=redo`.
+  - Compilación secuencial por servicio (`backend` $\rightarrow$ `frontend` $\rightarrow$ `worker`) para evitar picos de memoria en el nodo.
+  - Comprobación de caché de manifiestos en el registry para reusar imágenes en 0s si el commit no ha cambiado.
+* **Logs Sanitizados en Vivo:** Durante el estado `building_image`, el endpoint `/api/projects/:id/logs` remueve códigos ANSI (`\x1b[...]`) y filtra trazas irrelevantes de paquetes, permitiendo supervisar el build en tiempo real.

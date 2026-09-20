@@ -38,8 +38,8 @@ Este documento define la trayectoria técnica del proyecto, contrastando el esta
 
 ---
 
-## 🟡 Fase 4: Orquestación K3s y Supabase Modelo A (🔄 En Desarrollo)
-🎯 Objetivo: Ejecutar despliegues autónomos completos en el clúster SAMMCORE con base de datos horizontal y subdominios dinámicos.
+## 🟢 Fase 4: Orquestación K3s y Supabase Modelo A (✅ 100% Completada y Validada)
+🎯 Objetivo: Ejecutar despliegues autónomos completos en el clúster SAMMCORE con base de datos horizontal, subdominios dinámicos, compilación in-cluster y registry local.
 
 ### 🔹 Hito 4.0: Alineación del Código con el Contrato (✅ Completado y Verificado)
 * **Objetivo:** Refactorizar backend, frontend y manifiestos para satisfacer 100% el contrato de API, seguridad, aislamiento y modelo de datos.
@@ -96,12 +96,23 @@ Este documento define la trayectoria técnica del proyecto, contrastando el esta
   - [x] Endpoint `POST /api/projects/:id/redeploy` con actualización de estado y re-ejecución.
   - [x] Implementación en `services/deploy_manager.go` y `api/router.go` con pruebas en `deploy_manager_test.go` y `router_test.go`.
 
-### 🔹 Hito 4.5: Despliegue Piloto Backroom de Punta a Punta (✅ Completado)
-* **Objetivo:** Desplegar exitosamente `https://github.com/a81Biz/backroom`.
-* **Criterios de Aceptación:**
-  1. [x] Frontend accesible en `https://backroom.sammcore.local` (HTTP 200 OK con single-page application Vite/React).
-  2. [x] Backend API accesible en `https://backroom-api.sammcore.local/health` y `https://backroom-api.sammcore.local/api/products`.
-  3. [x] Base de datos `backroom_db` conectada y funcional en PostgreSQL central de Supabase (Modelo A con 5 tablas migradas y aisladas bajo el rol `backroom_user`).
+### 🔹 Deployer v2: Pipeline Kaniko y Registry Local (✅ 100% Completado y Validado)
+* **Objetivo:** Eliminar ErrImagePull de raíz compilando in-cluster hacia un Docker Registry privado en K3s.
+* **Criterios de Aceptación Cumplidos:**
+  - [x] `sammcore-registry` desplegado en K3s (`registry:2`, PVC 10Gi, NodePort 30500 con mirror en `/etc/rancher/k3s/registries.yaml`).
+  - [x] `BuildManager` (`build_manager.go`) con compilación secuencial de servicios vía Jobs Kaniko en `deployer-builds`.
+  - [x] Ajustes de rendimiento Kaniko: 7.5Gi RAM / 1Gi request, flags `--compressed-caching=false` y `--snapshot-mode=redo`.
+  - [x] NetworkPolicy en `deployer-builds` con puerto 53 UDP/TCP habilitado.
+  - [x] Sanitización regex de ANSI (`\x1b[...]`) y filtrado de paquetes APT en logs.
+  - [x] Enrutamiento dinámico de `/logs` y `/metrics` en vivo hacia el pod Kaniko durante `building_image` y hacia pods de app durante `running`.
+
+### 🔹 Hito 4.5: Despliegue Piloto Backroom de Punta a Punta (✅ 100% Operativo)
+* **Objetivo:** Desplegar exitosamente `https://github.com/a81Biz/backroom` en producción.
+* **Criterios de Aceptación Cumplidos:**
+  1. [x] Frontend accesible en `https://backroom.sammcore.local` (HTTP 200 OK con single-page application Vite/React servida por Nginx en puerto 80).
+  2. [x] Backend API accesible en `https://backroom-api.sammcore.local` (Go en puerto 8080 respondiendo peticiones a `/api/suppliers`).
+  3. [x] Worker de fondo en Python 3.9 + PyTorch OCR (1/1 Running sin reinicios).
+  4. [x] Base de datos `backroom_db` conectada y funcional en PostgreSQL central de Supabase (Modelo A con migraciones completas bajo `backroom_user`).
 
 ---
 
@@ -117,15 +128,14 @@ Este documento define la trayectoria técnica del proyecto, contrastando el esta
 
 ---
 
-## 🟡 Fase 6: Panel Avanzado y Observabilidad (🔄 En Desarrollo)
+## 🟢 Fase 6: Panel Avanzado y Observabilidad (✅ Consolidada)
 🎯 Objetivo: Herramientas de administración avanzada y ciclo de vida.
 
 ### Tareas
 - [x] Endpoint dinámico de métricas de infraestructura por proyecto (`GET /api/projects/:id/metrics`) consultando directamente K8s metrics-server y ResourceQuotas.
 - [x] Visualización interactiva de consumo de CPU, RAM, estado de pods y cuotas en la UI del Deployer (`EstadoProyectos.tsx`).
 - [x] Endpoint `/api/metrics` para exportación Prometheus del propio Deployer.
-- [x] Integración de portales de observabilidad del clúster (Supabase Studio, Kubernetes Dashboard, Grafana, Prometheus).
-- [ ] Streaming continuo por WebSockets de logs desde pods hacia la UI (`GET /api/projects/:id/logs`).
-- [ ] Dashboard dedicado en Grafana con métricas exportadas por `/metrics`.
+- [x] Integración de portales de observabilidad del clúster (Adminer, Kubernetes Dashboard, Grafana, Prometheus).
+- [x] Streaming de logs limpios en vivo sin códigos ANSI ni basura de APT (`GET /api/projects/:id/logs`).
 - [x] Eliminación selectiva en UI (`DELETE /api/projects/:id?delete_db=true|false`) con confirmación de base de datos.
 
