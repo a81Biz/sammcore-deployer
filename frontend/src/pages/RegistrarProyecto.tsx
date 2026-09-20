@@ -43,7 +43,9 @@ export default function RegistrarProyecto() {
     setDeployError(null);
 
     try {
-      const data = await analyzeRepo(repo.trim(), branch.trim() || "main");
+      const cleanRepo = repo.trim().replace(/\/+$/, "");
+      const cleanBranch = branch.trim();
+      const data = await analyzeRepo(cleanRepo, cleanBranch || "main");
       setAnalysisData(data);
       const name = data.name || "app";
       setProjectName(name);
@@ -218,6 +220,11 @@ export default function RegistrarProyecto() {
         {errorAnalyze && (
           <div style={{ marginTop: "14px", padding: "12px", background: "rgba(239, 68, 68, 0.15)", border: "1px solid #ef4444", borderRadius: "6px", color: "#fca5a5", fontSize: "0.9rem" }}>
             ⚠️ <strong>Error en análisis:</strong> {errorAnalyze}
+            {(errorAnalyze.includes("Authorization") || errorAnalyze.includes("401") || errorAnalyze.includes("clave de API") || errorAnalyze.includes("inválida")) && (
+              <div style={{ marginTop: "8px", fontSize: "0.85rem", color: "#fed7aa" }}>
+                💡 <em>Tip: Haz clic en el botón <strong>"🔑 Clave API"</strong> en la esquina superior derecha e ingresa tu token para autorizar la sesión.</em>
+              </div>
+            )}
           </div>
         )}
       </div>

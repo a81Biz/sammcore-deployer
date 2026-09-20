@@ -12,8 +12,16 @@ import (
 	"sammcore-deployer/services"
 )
 
-var repoRegex = regexp.MustCompile(`^https://github\.com/[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+(\.git)?$`)
+var repoRegex = regexp.MustCompile(`^https://github\.com/[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+(\.git)?/?$`)
 var nonAlphanumericDash = regexp.MustCompile(`[^a-z0-9-]+`)
+
+func CleanRepoURL(raw string) string {
+	cleaned := strings.TrimSpace(raw)
+	if strings.HasPrefix(cleaned, "git@github.com:") {
+		cleaned = "https://github.com/" + strings.TrimPrefix(cleaned, "git@github.com:")
+	}
+	return strings.TrimRight(cleaned, "/")
+}
 
 var reservedNames = map[string]bool{
 	"deployer":      true,
@@ -113,7 +121,7 @@ func sanitizeProjectName(repoURL string) (string, error) {
 }
 
 func Analyze(req AnalyzeRequest) AnalyzeResponse {
-	rawRepo := strings.TrimSpace(req.Repo)
+	rawRepo := CleanRepoURL(req.Repo)
 	if !repoRegex.MatchString(rawRepo) {
 		return AnalyzeResponse{
 			Status: "error",

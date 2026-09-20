@@ -279,7 +279,7 @@ func deployHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	repo := strings.TrimSpace(req.Repo)
+	repo := core.CleanRepoURL(req.Repo)
 	if repo == "" {
 		writeJSONError(w, http.StatusBadRequest, "El campo repo es obligatorio", "MISSING_REPO")
 		return
