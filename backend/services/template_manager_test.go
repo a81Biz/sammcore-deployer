@@ -74,6 +74,8 @@ func TestTemplateManager_PerServiceCompose(t *testing.T) {
 		"backroom-db-secrets",
 		"host: backroom.sammcore.local",
 		"host: backroom-api.sammcore.local",
+		"number: 80",
+		"number: 8080",
 	}
 
 	for _, str := range mustContain {

@@ -289,6 +289,7 @@ spec:
               service:
                 name: {{ .ServiceName }}
                 port:
+                  number: {{ .Port }}
     {{- end }}
 `
 
