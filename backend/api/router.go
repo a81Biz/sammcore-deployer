@@ -55,7 +55,11 @@ func getDeployManager() *services.DeployManager {
 func getAllowedOrigins() map[string]bool {
 	raw := os.Getenv("ALLOWED_ORIGINS")
 	if raw == "" {
-		raw = "https://deployer.sammcore.local,http://localhost:5173"
+		baseDomain := os.Getenv("BASE_DOMAIN")
+		if baseDomain == "" {
+			baseDomain = "sammcore.local"
+		}
+		raw = fmt.Sprintf("https://deployer.%s,http://localhost:5173", baseDomain)
 	}
 	origins := make(map[string]bool)
 	for _, o := range strings.Split(raw, ",") {
@@ -328,7 +332,11 @@ func redeployHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Reconstruir parámetros desde los datos persistidos del proyecto
+	// Reconstruir parámetros desde los datos persistidos del proyecto.
+	// NOTA: Los valores de las env vars no se persisten (solo EnvKeys con nombres de claves).
+	// El Secret K8s ya existe en el namespace del proyecto con los valores; EnsureCustomEnvSecret
+	// lo actualiza si HasCustomEnv es true y BuildArgs tiene valores. En redeploy sin nuevas vars,
+	// pasamos BuildArgs vacío y el Secret existente se reutiliza.
 	svcSpecs := storageInfoToServiceSpecs(p.Services)
 	manifestParams := services.ProjectManifestParams{
 		ProjectName:      p.Name,
@@ -339,8 +347,8 @@ func redeployHandler(w http.ResponseWriter, r *http.Request) {
 		RequiresDatabase: p.RequiresDatabase,
 		Services:         svcSpecs,
 		Images:           p.Images,
-		HasCustomEnv:     len(p.Env) > 0,
-		BuildArgs:        p.Env,
+		HasCustomEnv:     len(p.EnvKeys) > 0,
+		BuildArgs:        nil, // Los valores viven en el Secret K8s; no los re-aplicamos en redeploy
 	}
 
 	go func() {
@@ -426,10 +434,14 @@ func deployHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	projectID := strings.ToLower(core.DeriveDeterministicID(repo))
-	domain := fmt.Sprintf("%s.sammcore.local", name)
+	baseDomain := os.Getenv("BASE_DOMAIN")
+	if baseDomain == "" {
+		baseDomain = "sammcore.local"
+	}
+	domain := fmt.Sprintf("%s.%s", name, baseDomain)
 	var apiDomain string
 	if pType == "compose" {
-		apiDomain = fmt.Sprintf("%s-api.sammcore.local", name)
+		apiDomain = fmt.Sprintf("%s-api.%s", name, baseDomain)
 	}
 
 	proj := storage.Project{
@@ -445,7 +457,7 @@ func deployHandler(w http.ResponseWriter, r *http.Request) {
 		Status:           storage.StatusProvisioning,
 		Services:         serviceSpecsToStorageInfo(svcSpecs),
 		Commit:           commit,
-		Env:              req.BuildArgs,
+		EnvKeys:          storage.EnvKeysFromMap(req.BuildArgs), // Solo nombres, valores van al Secret K8s
 		CurrentStep:      1,
 		TotalSteps:       totalSteps,
 		StepDescription:  "Iniciando secuencia de despliegue...",

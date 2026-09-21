@@ -36,7 +36,7 @@ type Project struct {
 	Services         []ServiceInfo     `json:"services,omitempty"`
 	Commit           string            `json:"commit,omitempty"`
 	Images           map[string]string `json:"images,omitempty"`
-	Env              map[string]string `json:"env,omitempty"`
+	EnvKeys          []string          `json:"env_keys,omitempty"` // Solo nombres de claves; los valores viven en el Secret de K8s
 	LastError        string            `json:"last_error,omitempty"`
 	CurrentStep      int               `json:"current_step,omitempty"`
 	TotalSteps       int               `json:"total_steps,omitempty"`
@@ -191,4 +191,22 @@ func DeleteProject(id string) error {
 	}
 
 	return saveProjectsAtomic(filtered)
+}
+
+// EnvKeysFromMap extrae solo los nombres de las claves de un mapa de env vars.
+// Los valores NO se persisten; solo se guardan los nombres para referencia en el Secret K8s.
+func EnvKeysFromMap(envMap map[string]string) []string {
+	if len(envMap) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(envMap))
+	for k := range envMap {
+		keys = append(keys, k)
+	}
+	return keys
+}
+
+// HasCustomEnv reporta si el proyecto tiene variables de entorno personalizadas
+func (p *Project) HasCustomEnv() bool {
+	return len(p.EnvKeys) > 0
 }

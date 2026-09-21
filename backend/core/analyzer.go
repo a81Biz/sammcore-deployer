@@ -24,18 +24,20 @@ func CleanRepoURL(raw string) string {
 }
 
 var reservedNames = map[string]bool{
-	"deployer":      true,
-	"supabase":      true,
-	"monitoring":    true,
-	"ingress-nginx": true,
-	"default":       true,
-	"api":           true,
-	"docs":          true,
-	"admin":         true,
-	"grafana":       true,
-	"prometheus":    true,
-	"traefik":       true,
-	"portainer":     true,
+	"deployer":          true,
+	"supabase":          true,
+	"monitoring":        true,
+	"ingress-nginx":     true,
+	"default":           true,
+	"api":               true,
+	"docs":              true,
+	"admin":             true,
+	"grafana":           true,
+	"prometheus":        true,
+	"traefik":           true,
+	"portainer":         true,
+	"sammcore-registry": true,
+	"deployer-builds":   true,
 }
 
 func isReservedName(name string) bool {
@@ -191,12 +193,17 @@ func Analyze(req AnalyzeRequest) AnalyzeResponse {
 	}
 
 	projectID := DeriveDeterministicID(repoNormalized)
-	domain := fmt.Sprintf("%s.sammcore.local", projectName)
+
+	baseDomain := os.Getenv("BASE_DOMAIN")
+	if baseDomain == "" {
+		baseDomain = "sammcore.local"
+	}
+	domain := fmt.Sprintf("%s.%s", projectName, baseDomain)
 	var apiDomain string
 
 	if result.Type == services.ProjectCompose {
 		// Subdominio de nivel único compatible con el wildcard TLS *.sammcore.local
-		apiDomain = fmt.Sprintf("%s-api.sammcore.local", projectName)
+		apiDomain = fmt.Sprintf("%s-api.%s", projectName, baseDomain)
 	}
 
 	// NOTA ARQUITECTÓNICA: Analyze es estrictamente de sólo lectura.

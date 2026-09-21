@@ -6,7 +6,6 @@ import (
 	"io"
 	"log"
 	"net/http"
-	"net/url"
 	"os"
 	"regexp"
 	"strings"
@@ -159,13 +158,6 @@ func (bm *BuildManager) EnsureImages(ctx context.Context, p storage.Project, ser
 
 	repoURL := p.Repo
 	githubToken := secrets.GetGithubToken()
-	if githubToken != "" {
-		parsedURL, err := url.Parse(repoURL)
-		if err == nil {
-			parsedURL.User = url.UserPassword("x-access-token", githubToken)
-			repoURL = parsedURL.String()
-		}
-	}
 
 	// Compilación secuencial servicio por servicio
 	totalBuilds := len(buildsNeeded)
@@ -233,11 +225,16 @@ func (bm *BuildManager) EnsureImages(ctx context.Context, p storage.Project, ser
 						InitContainers: []corev1.Container{
 							{
 								Name:  "git-clone",
-								Image: "alpine/git:latest",
-								Command: []string{
-									"sh", "-c",
-									fmt.Sprintf("git clone --depth 1 %s /workspace && cd /workspace && git fetch --depth 1 origin %s && git checkout %s", repoURL, commit, commit),
+								Image: "alpine/git:2.43.0",
+								// El token se pasa por variable de entorno GIT_TOKEN para no
+								// exponer credenciales en el historial de comandos ni en la URL.
+								// REPO_HOST y COMMIT_SHA también son variables para evitar
+								// inyección de comandos: no se usa sh -c con strings interpolados.
+								Command: []string{"sh", "-c"},
+								Args: []string{
+									`git clone --depth 1 "https://x-access-token:${GIT_TOKEN}@${REPO_HOST}" /workspace && cd /workspace && git fetch --depth 1 origin "${COMMIT_SHA}" && git checkout "${COMMIT_SHA}"`,
 								},
+								Env: buildGitCloneEnv(repoURL, commit, githubToken),
 								VolumeMounts: []corev1.VolumeMount{
 									{
 										Name:      "workspace",
@@ -259,7 +256,7 @@ func (bm *BuildManager) EnsureImages(ctx context.Context, p storage.Project, ser
 						Containers: []corev1.Container{
 							{
 								Name:  "kaniko",
-								Image: "gcr.io/kaniko-project/executor:latest",
+								Image: "gcr.io/kaniko-project/executor:v1.23.2",
 								Args: []string{
 									"--context=dir:///workspace",
 									"--context-sub-path=" + sSpec.BuildContext,
@@ -471,4 +468,36 @@ func (bm *BuildManager) GetActiveBuildLogs(ctx context.Context, projectName stri
 	}
 
 	return strings.Join(kept, "\n"), nil
+}
+
+// buildGitCloneEnv construye las variables de entorno para el initContainer git-clone.
+// El token se pasa como GIT_TOKEN para evitar que aparezca en la URL ni en el historial de comandos.
+// REPO_HOST es el host del repositorio sin el esquema (ej: github.com/org/repo).
+// COMMIT_SHA es el hash del commit a clonar.
+// Si no hay token (repositorio público), GIT_TOKEN queda vacío y git clona sin credenciales.
+func buildGitCloneEnv(repoURL, commit, token string) []corev1.EnvVar {
+	// Extraer el host + path sin el esquema https://
+	repoHost := strings.TrimPrefix(repoURL, "https://")
+	repoHost = strings.TrimPrefix(repoHost, "http://")
+
+	gitToken := token
+	if gitToken == "" {
+		// Repositorio público: pasar cadena vacía; el script usará clone sin auth
+		gitToken = ""
+	}
+
+	return []corev1.EnvVar{
+		{
+			Name:  "GIT_TOKEN",
+			Value: gitToken,
+		},
+		{
+			Name:  "REPO_HOST",
+			Value: repoHost,
+		},
+		{
+			Name:  "COMMIT_SHA",
+			Value: commit,
+		},
+	}
 }

@@ -784,13 +784,15 @@ func (dm *DeployManager) RollbackDeployment(ctx context.Context, p storage.Proje
 	log.Printf("[Rollback] ✅ Limpieza de rollback completada para %s", p.Name)
 }
 
-// monitorRollout verifica el estado de los Deployments hasta que todos estén listos.
-// Si excede el deadline, ejecuta RollbackDeployment y marca el proyecto como FAILED con el motivo detallado.
+// monitorRollout verifica el estado de los Deployments hasta que todos estén completamente actualizados.
+// Usa la condición estricta: ObservedGeneration >= Generation AND UpdatedReplicas == Replicas == AvailableReplicas.
+// Esto evita falsos positivos en rolling updates donde el pod viejo aún cuenta como ReadyReplicas.
+// Si excede el deadline (300s), ejecuta RollbackDeployment y marca el proyecto como FAILED.
 func (dm *DeployManager) monitorRollout(ctx context.Context, p storage.Project) {
 	desc := fmt.Sprintf("Paso %d/%d: Verificando disponibilidad (readiness) de pods en K3s...", p.TotalSteps, p.TotalSteps)
 	updateProjectProgress(&p, storage.StatusDeploying, p.TotalSteps, p.TotalSteps, desc, "")
 
-	deadline := time.Now().Add(120 * time.Second)
+	deadline := time.Now().Add(300 * time.Second)
 	for time.Now().Before(deadline) {
 		time.Sleep(5 * time.Second)
 		deps, err := dm.kubeClient.AppsV1().Deployments(p.Namespace).List(ctx, metav1.ListOptions{})
@@ -800,7 +802,21 @@ func (dm *DeployManager) monitorRollout(ctx context.Context, p storage.Project) 
 
 		allReady := true
 		for _, d := range deps.Items {
-			if d.Status.ReadyReplicas < 1 {
+			s := d.Status
+			// Condición estricta para rolling update:
+			// 1. El controlador ha procesado esta generación del Deployment
+			// 2. Todos los pods están en la versión nueva (UpdatedReplicas == Replicas)
+			// 3. Todos los pods nuevos están disponibles (AvailableReplicas == Replicas)
+			desired := d.Spec.Replicas
+			if desired == nil {
+				allReady = false
+				break
+			}
+			if s.ObservedGeneration < d.Generation {
+				allReady = false
+				break
+			}
+			if s.UpdatedReplicas < *desired || s.AvailableReplicas < *desired {
 				allReady = false
 				break
 			}
@@ -814,7 +830,7 @@ func (dm *DeployManager) monitorRollout(ctx context.Context, p storage.Project) 
 
 	// TIMEOUT: recopilar motivos de fallo de los pods
 	failReason := dm.collectFailureReasons(ctx, p.Namespace)
-	errMsg := fmt.Sprintf("timeout esperando rollout (120s): %s", failReason)
+	errMsg := fmt.Sprintf("timeout esperando rollout (300s): %s", failReason)
 	log.Printf("[Deploy] ⚠️ Proyecto %s: %s", p.Name, errMsg)
 
 	// Ejecutar rollback automático: eliminar deployments/pods rotos
