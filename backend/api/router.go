@@ -310,37 +310,36 @@ func redeployHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var redeployReq struct {
-		Commit string `json:"commit,omitempty"`
-	}
-	_ = json.NewDecoder(r.Body).Decode(&redeployReq)
-	reqCommit := strings.TrimSpace(redeployReq.Commit)
-	if reqCommit != "" && !core.CommitRegex.MatchString(reqCommit) {
-		writeJSONError(w, http.StatusBadRequest, "Commit inválido: debe ser un hash hexadecimal git de entre 7 y 40 caracteres", "INVALID_COMMIT")
-		return
+	var reqCommit string
+	if r.Body != nil {
+		var redeployReq struct {
+			Commit string `json:"commit,omitempty"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&redeployReq)
+		reqCommit = strings.TrimSpace(redeployReq.Commit)
+		if reqCommit != "" && !core.CommitRegex.MatchString(reqCommit) {
+			writeJSONError(w, http.StatusBadRequest, "Commit inválido: debe ser un hash hexadecimal git de entre 7 y 40 caracteres", "INVALID_COMMIT")
+			return
+		}
 	}
 
 	// Obtener el último commit y estado de servicios de la rama en GitHub para el re-despliegue
 	analyzed := core.Analyze(core.AnalyzeRequest{Repo: p.Repo, Branch: p.Branch})
-	if analyzed.Status != "ok" {
+	if analyzed.Status == "ok" {
+		if reqCommit != "" {
+			p.Commit = reqCommit
+		} else if analyzed.Commit != "" {
+			p.Commit = analyzed.Commit
+		}
+		if len(analyzed.Services) > 0 {
+			p.Services = serviceSpecsToStorageInfo(analyzed.Services)
+			p.RequiresDatabase = analyzed.RequiresDatabase
+		}
+	} else if reqCommit != "" {
+		p.Commit = reqCommit
+	} else if p.Commit == "" {
 		writeJSONError(w, http.StatusBadRequest, fmt.Sprintf("Error al analizar repositorio para re-despliegue: %s", analyzed.Error), "ANALYZE_FAILED")
 		return
-	}
-	if analyzed.Commit == "" && reqCommit == "" {
-		writeJSONError(w, http.StatusBadRequest, "No se pudo resolver el commit más reciente de la rama para el re-despliegue", "MISSING_COMMIT")
-		return
-	}
-
-	if reqCommit != "" {
-		p.Commit = reqCommit
-	} else {
-		p.Commit = analyzed.Commit
-	}
-
-	// Actualizar plan de servicios con el análisis fresco del commit
-	if len(analyzed.Services) > 0 {
-		p.Services = serviceSpecsToStorageInfo(analyzed.Services)
-		p.RequiresDatabase = analyzed.RequiresDatabase
 	}
 
 	totalSteps := 3
