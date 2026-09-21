@@ -104,7 +104,7 @@ func TestDeployAndManageEndpoints(t *testing.T) {
 	deployBody := []byte(`{
 		"name": "backroom",
 		"repo": "https://github.com/a81Biz/backroom",
-		"branch": "master",
+		"branch": "main",
 		"type": "compose",
 		"services": [
 			{"name": "frontend", "role": "web", "port": 80, "build_context": "./frontend", "dockerfile": "Dockerfile"},
@@ -172,5 +172,27 @@ func TestDeployAndManageEndpoints(t *testing.T) {
 	_, err = storage.GetProject(projectID)
 	if err == nil {
 		t.Errorf("expected project to be deleted from storage")
+	}
+}
+
+func TestConfigEndpoint(t *testing.T) {
+	r := NewRouter()
+	req, _ := http.NewRequest("GET", "/api/config", nil)
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK on GET /api/config, got %v", rr.Code)
+	}
+
+	var cfg map[string]interface{}
+	if err := json.NewDecoder(rr.Body).Decode(&cfg); err != nil {
+		t.Fatalf("failed to decode config response: %v", err)
+	}
+	if cfg["base_domain"] == "" {
+		t.Errorf("expected base_domain in config response")
+	}
+	if cfg["builds_namespace"] == "" {
+		t.Errorf("expected builds_namespace in config response")
 	}
 }
