@@ -185,3 +185,41 @@ Para garantizar la autonomía total del clúster sin depender de servicios exter
   - Compilación secuencial por servicio (`backend` $\rightarrow$ `frontend` $\rightarrow$ `worker`) para evitar picos de memoria en el nodo.
   - Comprobación de caché de manifiestos en el registry para reusar imágenes en 0s si el commit no ha cambiado.
 * **Logs Sanitizados en Vivo:** Durante el estado `building_image`, el endpoint `/api/projects/:id/logs` remueve códigos ANSI (`\x1b[...]`) y filtra trazas irrelevantes de paquetes, permitiendo supervisar el build en tiempo real.
+
+---
+
+## Seguridad y Configuración Central
+
+### config/config.go — Configuración unificada
+
+Toda la configuración del deployer se centraliza en `backend/config/config.go`:
+
+| Variable de entorno | Default | Descripción |
+|---------------------|---------|-------------|
+| `BASE_DOMAIN` | `sammcore.local` | Dominio base del clúster |
+| `BUILDS_NAMESPACE` | `deployer-builds` | Namespace para Jobs Kaniko |
+| `REGISTRY_URL` | `registry.sammcore-registry.svc.cluster.local:5000` | Registry interno |
+| `DB_APP_HOST` | `postgres.supabase.svc.cluster.local` | Host de BD para apps |
+| `INGRESS_CLASS` | `nginx` | Clase de Ingress |
+| `GIT_IMAGE` | `alpine/git:2.43.0` | Imagen git (versión fija) |
+| `KANIKO_IMAGE` | `gcr.io/kaniko-project/executor:v1.23.2` | Imagen Kaniko (versión fija) |
+| `BUILD_TIMEOUT_SEC` | `900` | Timeout build en segundos |
+| `ROLLOUT_TIMEOUT_SEC` | `300` | Timeout rollout en segundos |
+
+### Token de GitHub — env var, no URL
+
+El token de acceso a repositorios privados se pasa como variable de entorno `GIT_TOKEN` al initContainer `git-clone`. No se embebe en la URL ni en argumentos de comandos shell. El patrón seguro en el Job de Kaniko:
+
+```yaml
+env:
+  - name: GIT_TOKEN
+    value: "<token>"  # en producción desde Secret K8s
+  - name: REPO_HOST
+    value: "github.com/org/repo"
+  - name: COMMIT_SHA
+    value: "<commit-hash>"
+```
+
+### Project.EnvKeys — valores nunca en disco
+
+El campo `Env map[string]string` del struct `Project` fue renombrado a `EnvKeys []string`. Solo se persisten los **nombres** de las claves de entorno. Los **valores** viven exclusivamente en el Secret K8s `<proyecto>-env-secrets`.

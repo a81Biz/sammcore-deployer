@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/subtle"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
+	"sammcore-deployer/config"
 	"sammcore-deployer/core"
 	"sammcore-deployer/services"
 	"sammcore-deployer/storage"
@@ -308,10 +310,37 @@ func redeployHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Obtener el último commit de la rama en GitHub para el re-despliegue
+	var redeployReq struct {
+		Commit string `json:"commit,omitempty"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&redeployReq)
+	reqCommit := strings.TrimSpace(redeployReq.Commit)
+	if reqCommit != "" && !core.CommitRegex.MatchString(reqCommit) {
+		writeJSONError(w, http.StatusBadRequest, "Commit inválido: debe ser un hash hexadecimal git de entre 7 y 40 caracteres", "INVALID_COMMIT")
+		return
+	}
+
+	// Obtener el último commit y estado de servicios de la rama en GitHub para el re-despliegue
 	analyzed := core.Analyze(core.AnalyzeRequest{Repo: p.Repo, Branch: p.Branch})
-	if analyzed.Status == "ok" && analyzed.Commit != "" {
+	if analyzed.Status != "ok" {
+		writeJSONError(w, http.StatusBadRequest, fmt.Sprintf("Error al analizar repositorio para re-despliegue: %s", analyzed.Error), "ANALYZE_FAILED")
+		return
+	}
+	if analyzed.Commit == "" && reqCommit == "" {
+		writeJSONError(w, http.StatusBadRequest, "No se pudo resolver el commit más reciente de la rama para el re-despliegue", "MISSING_COMMIT")
+		return
+	}
+
+	if reqCommit != "" {
+		p.Commit = reqCommit
+	} else {
 		p.Commit = analyzed.Commit
+	}
+
+	// Actualizar plan de servicios con el análisis fresco del commit
+	if len(analyzed.Services) > 0 {
+		p.Services = serviceSpecsToStorageInfo(analyzed.Services)
+		p.RequiresDatabase = analyzed.RequiresDatabase
 	}
 
 	totalSteps := 3
@@ -332,11 +361,7 @@ func redeployHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Reconstruir parámetros desde los datos persistidos del proyecto.
-	// NOTA: Los valores de las env vars no se persisten (solo EnvKeys con nombres de claves).
-	// El Secret K8s ya existe en el namespace del proyecto con los valores; EnsureCustomEnvSecret
-	// lo actualiza si HasCustomEnv es true y BuildArgs tiene valores. En redeploy sin nuevas vars,
-	// pasamos BuildArgs vacío y el Secret existente se reutiliza.
+	// Reconstruir parámetros desde los datos del proyecto actualizado
 	svcSpecs := storageInfoToServiceSpecs(p.Services)
 	manifestParams := services.ProjectManifestParams{
 		ProjectName:      p.Name,
@@ -379,6 +404,18 @@ func deployHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Validar formato de URL de repositorio
+	if !core.RepoRegex.MatchString(repo) {
+		writeJSONError(w, http.StatusBadRequest, "URL de repositorio inválida. Debe ser una URL HTTPS de GitHub (ej. https://github.com/org/repo)", "INVALID_REPO_URL")
+		return
+	}
+
+	commit := strings.TrimSpace(req.Commit)
+	if commit != "" && !core.CommitRegex.MatchString(commit) {
+		writeJSONError(w, http.StatusBadRequest, "Formato de commit inválido. Debe ser un hash hexadecimal git de entre 7 y 40 caracteres", "INVALID_COMMIT")
+		return
+	}
+
 	name := strings.TrimSpace(req.Name)
 	if name == "" {
 		analyzed := core.Analyze(core.AnalyzeRequest{Repo: repo, Branch: req.Branch})
@@ -414,7 +451,6 @@ func deployHandler(w http.ResponseWriter, r *http.Request) {
 
 	// Usar servicios del request (enviados por la UI) o re-analizar
 	svcSpecs := req.Services
-	commit := strings.TrimSpace(req.Commit)
 
 	if commit == "" || len(svcSpecs) == 0 {
 		analyzed := core.Analyze(core.AnalyzeRequest{Repo: repo, Branch: branch})
@@ -466,6 +502,10 @@ func deployHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := storage.AddOrUpdateProject(proj); err != nil {
+		if errors.Is(err, storage.ErrNamespaceConflict) {
+			writeJSONError(w, http.StatusConflict, err.Error(), "PROJECT_NAME_CONFLICT")
+			return
+		}
 		writeJSONError(w, http.StatusInternalServerError, fmt.Sprintf("Error guardando proyecto: %v", err), "STORE_ERROR")
 		return
 	}
@@ -518,6 +558,17 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 }
 
+func configHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	cfg := config.Load()
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		"base_domain":      cfg.BaseDomain,
+		"builds_namespace": cfg.BuildsNamespace,
+		"registry_url":     cfg.RegistryURL,
+		"ingress_class":    cfg.IngressClass,
+	})
+}
+
 func NewRouter() http.Handler {
 	r := mux.NewRouter()
 
@@ -526,6 +577,8 @@ func NewRouter() http.Handler {
 	r.Handle("/api/metrics", promhttp.Handler())
 	r.HandleFunc("/health", healthHandler).Methods("GET")
 	r.HandleFunc("/api/health", healthHandler).Methods("GET")
+	r.HandleFunc("/config", configHandler).Methods("GET")
+	r.HandleFunc("/api/config", configHandler).Methods("GET")
 
 	// Subrouter protegido bajo /api
 	apiRouter := r.PathPrefix("/api").Subrouter()

@@ -12,7 +12,9 @@ import (
 	"sammcore-deployer/services"
 )
 
-var repoRegex = regexp.MustCompile(`^https://github\.com/[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+(\.git)?/?$`)
+var RepoRegex = regexp.MustCompile(`^https://github\.com/[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+(\.git)?/?$`)
+var CommitRegex = regexp.MustCompile(`^[0-9a-f]{7,40}$`)
+var repoRegex = RepoRegex
 var nonAlphanumericDash = regexp.MustCompile(`[^a-z0-9-]+`)
 
 func CleanRepoURL(raw string) string {

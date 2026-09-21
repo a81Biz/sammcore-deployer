@@ -99,6 +99,10 @@ func (bm *BuildManager) imageExistsInRegistry(project, service, tag string) bool
 	return resp.StatusCode == http.StatusOK
 }
 
+// buildGlobalSemaphore limita las compilaciones simultáneas a 1 en todo el clúster
+// para proteger la ResourceQuota del namespace deployer-builds (10Gi RAM máx.)
+var buildGlobalSemaphore = make(chan struct{}, 1)
+
 // EnsureImages construye las imágenes de Docker para cada servicio de forma secuencial
 // a través de Jobs de Kaniko en el namespace deployer-builds.
 func (bm *BuildManager) EnsureImages(ctx context.Context, p storage.Project, services []ServiceSpec, commit string) (map[string]string, error) {
@@ -133,6 +137,18 @@ func (bm *BuildManager) EnsureImages(ctx context.Context, p storage.Project, ser
 
 	if len(buildsNeeded) == 0 {
 		return images, nil
+	}
+
+	// Adquirir semáforo global para no saturar la ResourceQuota con múltiples builds simultáneos
+	p.Status = storage.StatusBuilding
+	p.StepDescription = "En cola global de compilación esperando disponibilidad..."
+	_ = storage.AddOrUpdateProject(p)
+
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case buildGlobalSemaphore <- struct{}{}:
+		defer func() { <-buildGlobalSemaphore }()
 	}
 
 	// Asegurar que el namespace deployer-builds existe

@@ -105,6 +105,12 @@ Este documento define la trayectoria técnica del proyecto, contrastando el esta
   - [x] NetworkPolicy en `deployer-builds` con puerto 53 UDP/TCP habilitado.
   - [x] Sanitización regex de ANSI (`\x1b[...]`) y filtrado de paquetes APT en logs.
   - [x] Enrutamiento dinámico de `/logs` y `/metrics` en vivo hacia el pod Kaniko durante `building_image` y hacia pods de app durante `running`.
+* **Nota de Mejoras de Seguridad y Robustez (Completadas):**
+  - [x] Token Git seguro via env var (no interpolación en shell)
+  - [x] Config central `config/config.go` con BASE_DOMAIN eliminando hardcodes
+  - [x] `monitorRollout` usa condición estricta (ObservedGeneration + UpdatedReplicas)
+  - [x] `Project.EnvKeys` reemplaza `Project.Env` (valores sensibles no en disco)
+  - [x] Lista `reservedNames` incluye `sammcore-registry` y `deployer-builds`
 
 ### 🔹 Hito 4.5: Despliegue Piloto Backroom de Punta a Punta (✅ 100% Operativo)
 * **Objetivo:** Desplegar exitosamente `https://github.com/a81Biz/backroom` en producción.

@@ -122,6 +122,10 @@ func SaveProjects(projects []Project) error {
 	return saveProjectsAtomic(projects)
 }
 
+// ErrNamespaceConflict se retorna cuando se intenta registrar un proyecto cuyo nombre o namespace
+// ya está en uso por otro repositorio distinto
+var ErrNamespaceConflict = errors.New("el nombre o namespace ya está asignado a otro repositorio")
+
 func AddOrUpdateProject(p Project) error {
 	mu.Lock()
 	defer mu.Unlock()
@@ -133,6 +137,11 @@ func AddOrUpdateProject(p Project) error {
 
 	updated := false
 	for i, existing := range projects {
+		// Validar que no haya colisión de nombre o namespace con un repositorio distinto
+		if (existing.Name == p.Name || existing.Namespace == p.Namespace) && existing.ID != p.ID && existing.Repo != p.Repo {
+			return fmt.Errorf("%w: el proyecto '%s' (namespace '%s') pertenece a '%s'", ErrNamespaceConflict, existing.Name, existing.Namespace, existing.Repo)
+		}
+
 		if existing.ID == p.ID || existing.Repo == p.Repo {
 			p.ID = existing.ID
 			p.CreatedAt = existing.CreatedAt

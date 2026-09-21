@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"strings"
 	"text/template"
+
+	"sammcore-deployer/config"
 )
 
 // ProjectManifestParams contiene los parámetros para renderizar manifiestos de Kubernetes.
@@ -122,6 +124,8 @@ type serviceDeploymentData struct {
 	RequiresDatabase bool
 	HasCustomEnv     bool
 	IsAPIOrWorker    bool // true si necesita envFrom con secrets
+	DBHost           string
+	BusyboxImage     string
 }
 
 // deploymentTemplate genera un Deployment + Service (si tiene puerto) por cada servicio
@@ -131,6 +135,11 @@ kind: Deployment
 metadata:
   name: {{ .FullName }}
   namespace: {{ .Namespace }}
+  labels:
+    app.kubernetes.io/managed-by: sammcore-deployer
+    project: {{ .ProjectName }}
+    service: {{ .ServiceName }}
+    role: {{ .Role }}
 spec:
   replicas: 1
   selector:
@@ -140,14 +149,15 @@ spec:
     metadata:
       labels:
         app: {{ .FullName }}
+        project: {{ .ProjectName }}
         role: {{ .Role }}
     spec:
       automountServiceAccountToken: false
       {{- if .RequiresDatabase }}
       initContainers:
         - name: wait-for-db
-          image: busybox:1.36
-          command: ['sh', '-c', 'until nc -z -w 2 postgres.supabase.svc.cluster.local 5432; do echo esperando postgres; sleep 2; done']
+          image: {{ .BusyboxImage }}
+          command: ['sh', '-c', 'until nc -z -w 2 {{ .DBHost }} 5432; do echo esperando postgres; sleep 2; done']
           resources:
             requests:
               cpu: 10m
@@ -205,6 +215,10 @@ kind: Service
 metadata:
   name: {{ .FullName }}
   namespace: {{ .Namespace }}
+  labels:
+    app.kubernetes.io/managed-by: sammcore-deployer
+    project: {{ .ProjectName }}
+    service: {{ .ServiceName }}
 spec:
   type: ClusterIP
   selector:
@@ -223,6 +237,9 @@ kind: Service
 metadata:
   name: backend
   namespace: {{ .Namespace }}
+  labels:
+    app.kubernetes.io/managed-by: sammcore-deployer
+    project: {{ .ProjectName }}
 spec:
   type: ClusterIP
   selector:
@@ -242,9 +259,10 @@ type ingressRuleData struct {
 
 // ingressData agrupa todas las reglas de Ingress para el proyecto
 type ingressData struct {
-	ProjectName string
-	Namespace   string
-	Rules       []ingressRuleData
+	ProjectName  string
+	Namespace    string
+	IngressClass string
+	Rules        []ingressRuleData
 }
 
 const ingressTemplate = `---
@@ -253,10 +271,13 @@ kind: Ingress
 metadata:
   name: {{ .ProjectName }}-ingress
   namespace: {{ .Namespace }}
+  labels:
+    app.kubernetes.io/managed-by: sammcore-deployer
+    project: {{ .ProjectName }}
   annotations:
     nginx.ingress.kubernetes.io/proxy-body-size: "50m"
 spec:
-  ingressClassName: nginx
+  ingressClassName: {{ .IngressClass }}
   rules:
     {{- range .Rules }}
     - host: {{ .Host }}
@@ -268,7 +289,6 @@ spec:
               service:
                 name: {{ .ServiceName }}
                 port:
-                  number: {{ .Port }}
     {{- end }}
 `
 
@@ -317,6 +337,7 @@ func (tm *TemplateManager) RenderServiceManifests(params ProjectManifestParams) 
 	var buf bytes.Buffer
 	var ingressRules []ingressRuleData
 	var apiService *serviceDeploymentData
+	cfg := config.Load()
 
 	for _, svc := range params.Services {
 		image := ""
@@ -341,6 +362,8 @@ func (tm *TemplateManager) RenderServiceManifests(params ProjectManifestParams) 
 			RequiresDatabase: params.RequiresDatabase && isAPIOrWorker,
 			HasCustomEnv:     params.HasCustomEnv && isAPIOrWorker,
 			IsAPIOrWorker:    isAPIOrWorker,
+			DBHost:           cfg.DBAppHost,
+			BusyboxImage:     cfg.BusyboxImage,
 		}
 
 		// Renderizar Deployment
@@ -391,9 +414,10 @@ func (tm *TemplateManager) RenderServiceManifests(params ProjectManifestParams) 
 	// Renderizar Ingress con todas las reglas
 	if len(ingressRules) > 0 {
 		ingData := ingressData{
-			ProjectName: params.ProjectName,
-			Namespace:   params.Namespace,
-			Rules:       ingressRules,
+			ProjectName:  params.ProjectName,
+			Namespace:    params.Namespace,
+			IngressClass: cfg.IngressClass,
+			Rules:        ingressRules,
 		}
 		if err := ingTmpl.Execute(&buf, ingData); err != nil {
 			return "", fmt.Errorf("error al renderizar ingress: %w", err)
