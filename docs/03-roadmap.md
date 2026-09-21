@@ -112,6 +112,7 @@ Este documento define la trayectoria técnica del proyecto, contrastando el esta
   - [x] `Project.EnvKeys` reemplaza `Project.Env` (valores sensibles no en disco)
   - [x] Lista `reservedNames` incluye `sammcore-registry` y `deployer-builds`
   - [x] Dimensionamiento elástico y cuotas dinámicas por rol (`web`, `api`, `worker`) con bolsa compartida de namespace (`3Gi` límite, `512Mi` request) para prevenir OOM en workers pesados y evitar sobre-aprovisionamiento estático.
+  - [x] Auto-generación de Dockerfile multi-stage para proyectos Frontend / Static / SPA (Vite, React, Vue, HTML puro) cuando no existe Dockerfile manual en el repositorio.
 
 ### 🔹 Hito 4.5: Despliegue Piloto Backroom de Punta a Punta (✅ 100% Operativo)
 * **Objetivo:** Desplegar exitosamente `https://github.com/a81Biz/backroom` en producción.

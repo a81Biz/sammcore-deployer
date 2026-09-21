@@ -544,7 +544,7 @@ func (r *RepoManager) DetectServicePlan() (DetectionResult, error) {
 			Role:         RoleWeb,
 			Port:         80,
 			BuildContext: ".",
-			Dockerfile:   "",
+			Dockerfile:   "Dockerfile.sammcore",
 		}}
 	}
 

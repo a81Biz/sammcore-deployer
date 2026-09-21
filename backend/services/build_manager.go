@@ -119,8 +119,11 @@ func (bm *BuildManager) EnsureImages(ctx context.Context, p storage.Project, ser
 	var buildsNeeded []buildTask
 
 	for _, s := range services {
-		if s.BuildContext == "" || s.Dockerfile == "" {
+		if s.BuildContext == "" {
 			continue
+		}
+		if s.Dockerfile == "" {
+			s.Dockerfile = "Dockerfile.sammcore"
 		}
 
 		fullImageRef := fmt.Sprintf("%s/%s/%s:%s", bm.registryURL, p.Name, s.Name, shortCommit)
@@ -248,9 +251,49 @@ func (bm *BuildManager) EnsureImages(ctx context.Context, p storage.Project, ser
 								// inyección de comandos: no se usa sh -c con strings interpolados.
 								Command: []string{"sh", "-c"},
 								Args: []string{
-									`git clone --depth 1 "https://x-access-token:${GIT_TOKEN}@${REPO_HOST}" /workspace && cd /workspace && git fetch --depth 1 origin "${COMMIT_SHA}" && git checkout "${COMMIT_SHA}"`,
+									`if [ -n "$GIT_TOKEN" ]; then
+	CLONE_URL="https://x-access-token:${GIT_TOKEN}@${REPO_HOST}"
+else
+	CLONE_URL="https://${REPO_HOST}"
+fi
+git clone --depth 1 "$CLONE_URL" /workspace && cd /workspace && git fetch --depth 1 origin "${COMMIT_SHA}" && git checkout "${COMMIT_SHA}"
+
+# Auto-generación de Dockerfile si no existe (ej. para sitios estáticos SPA / Vite / React / HTML)
+TARGET_DF="/workspace/${BUILD_CONTEXT}/${DOCKERFILE_NAME}"
+TARGET_DIR="/workspace/${BUILD_CONTEXT}"
+if [ ! -f "$TARGET_DF" ]; then
+	mkdir -p "$TARGET_DIR"
+	if [ -f "$TARGET_DIR/package.json" ]; then
+		echo "[Deployer] Auto-generando Dockerfile multi-stage para Node/Vite/React en $TARGET_DF..."
+		cat << 'EOF' > "$TARGET_DF"
+FROM node:20-alpine AS builder
+WORKDIR /app
+COPY package*.json ./
+RUN npm install
+COPY . .
+RUN npm run build || true
+
+FROM nginx:alpine
+COPY --from=builder /app/dist /usr/share/nginx/html
+RUN if [ ! -f /usr/share/nginx/html/index.html ] && [ -d /app/build ]; then cp -r /app/build/* /usr/share/nginx/html/; fi
+RUN printf 'server {\n    listen 80;\n    location / {\n        root /usr/share/nginx/html;\n        index index.html index.htm;\n        try_files $uri $uri/ /index.html;\n    }\n}\n' > /etc/nginx/conf.d/default.conf
+EXPOSE 80
+CMD ["nginx", "-g", "daemon off;"]
+EOF
+	else
+		echo "[Deployer] Auto-generando Dockerfile para sitio estático HTML en $TARGET_DF..."
+		cat << 'EOF' > "$TARGET_DF"
+FROM nginx:alpine
+COPY . /usr/share/nginx/html
+RUN printf 'server {\n    listen 80;\n    location / {\n        root /usr/share/nginx/html;\n        index index.html index.htm;\n        try_files $uri $uri/ /index.html;\n    }\n}\n' > /etc/nginx/conf.d/default.conf
+EXPOSE 80
+CMD ["nginx", "-g", "daemon off;"]
+EOF
+	fi
+fi
+`,
 								},
-								Env: buildGitCloneEnv(repoURL, commit, githubToken),
+								Env: buildGitCloneEnv(repoURL, commit, githubToken, sSpec.BuildContext, sSpec.Dockerfile),
 								VolumeMounts: []corev1.VolumeMount{
 									{
 										Name:      "workspace",
@@ -491,7 +534,7 @@ func (bm *BuildManager) GetActiveBuildLogs(ctx context.Context, projectName stri
 // REPO_HOST es el host del repositorio sin el esquema (ej: github.com/org/repo).
 // COMMIT_SHA es el hash del commit a clonar.
 // Si no hay token (repositorio público), GIT_TOKEN queda vacío y git clona sin credenciales.
-func buildGitCloneEnv(repoURL, commit, token string) []corev1.EnvVar {
+func buildGitCloneEnv(repoURL, commit, token, buildContext, dockerfile string) []corev1.EnvVar {
 	// Extraer el host + path sin el esquema https://
 	repoHost := strings.TrimPrefix(repoURL, "https://")
 	repoHost = strings.TrimPrefix(repoHost, "http://")
@@ -500,6 +543,13 @@ func buildGitCloneEnv(repoURL, commit, token string) []corev1.EnvVar {
 	if gitToken == "" {
 		// Repositorio público: pasar cadena vacía; el script usará clone sin auth
 		gitToken = ""
+	}
+
+	if dockerfile == "" {
+		dockerfile = "Dockerfile.sammcore"
+	}
+	if buildContext == "" {
+		buildContext = "."
 	}
 
 	return []corev1.EnvVar{
@@ -514,6 +564,14 @@ func buildGitCloneEnv(repoURL, commit, token string) []corev1.EnvVar {
 		{
 			Name:  "COMMIT_SHA",
 			Value: commit,
+		},
+		{
+			Name:  "BUILD_CONTEXT",
+			Value: buildContext,
+		},
+		{
+			Name:  "DOCKERFILE_NAME",
+			Value: dockerfile,
 		},
 	}
 }

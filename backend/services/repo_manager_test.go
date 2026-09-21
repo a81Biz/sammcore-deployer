@@ -440,6 +440,9 @@ func TestDetectServicePlan_Static(t *testing.T) {
 	if res.Services[0].Port != 80 {
 		t.Errorf("expected port 80, got %d", res.Services[0].Port)
 	}
+	if res.Services[0].Dockerfile != "Dockerfile.sammcore" {
+		t.Errorf("expected Dockerfile 'Dockerfile.sammcore', got %q", res.Services[0].Dockerfile)
+	}
 }
 
 func TestInferServiceRole(t *testing.T) {

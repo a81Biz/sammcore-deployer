@@ -183,7 +183,10 @@ Para garantizar la autonomía total del clúster sin depender de servicios exter
   - Pods de Kaniko con límite de memoria de **7.5 GiB** (requests 1 GiB) para compilar sin saturación dependencias pesadas de ML (PyTorch/Torchvision).
   - Flags de alto rendimiento: `--compressed-caching=false` y `--snapshot-mode=redo`.
   - Compilación secuencial por servicio (`backend` $\rightarrow$ `frontend` $\rightarrow$ `worker`) para evitar picos de memoria en el nodo.
-  - Comprobación de caché de manifiestos en el registry para reusar imágenes en 0s si el commit no ha cambiado.
+* **Auto-generación de Dockerfiles para Frontend / Static / SPA:**
+  Cuando un repositorio no incluye un archivo `Dockerfile` (ej. proyectos frontend en React, Vite, Vue o sitios HTML estáticos detectados como `ProjectStatic`), el `initContainer` de Kaniko genera automáticamente en el workspace un `Dockerfile.sammcore`:
+  - **Proyectos con `package.json` (Vite, React, Vue, Next export):** Multi-stage build con `node:20-alpine` (`npm install && npm run build`) y servidor `nginx:alpine` sirviendo `/dist` con soporte completo de enrutamiento SPA (`try_files $uri $uri/ /index.html`).
+  - **Sitios HTML estáticos puros:** Servidor `nginx:alpine` copiando directamente los assets al webroot.
 * **Logs Sanitizados en Vivo:** Durante el estado `building_image`, el endpoint `/api/projects/:id/logs` remueve códigos ANSI (`\x1b[...]`) y filtra trazas irrelevantes de paquetes, permitiendo supervisar el build en tiempo real.
 
 ---
