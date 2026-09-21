@@ -23,6 +23,8 @@ func TestTemplateManager_BaseManifests(t *testing.T) {
 		"pod-security.kubernetes.io/enforce: baseline",
 		"kind: ResourceQuota",
 		"name: my-app-quota",
+		"requests.memory: \"512Mi\"",
+		"limits.memory: \"3Gi\"",
 		"kind: LimitRange",
 		"name: my-app-limits",
 		"kind: NetworkPolicy",
@@ -119,6 +121,17 @@ func TestTemplateManager_PerServiceCompose(t *testing.T) {
 	// Verificar el alias "backend" Service
 	if !strings.Contains(rendered, "name: backend\n") {
 		t.Errorf("should contain backend alias Service")
+	}
+
+	// Verificar límites elásticos por rol
+	if !strings.Contains(rendered, "memory: 128Mi") {
+		t.Errorf("frontend should have 128Mi memory limit")
+	}
+	if !strings.Contains(rendered, "memory: 512Mi") {
+		t.Errorf("backend should have 512Mi memory limit")
+	}
+	if !strings.Contains(rendered, "memory: 1536Mi") {
+		t.Errorf("worker should have 1536Mi memory limit")
 	}
 }
 

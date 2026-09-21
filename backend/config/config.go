@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -61,6 +62,13 @@ type Config struct {
 
 	// CORS: orígenes permitidos (separados por coma)
 	AllowedOrigins string
+
+	// Cuotas de recursos por proyecto (Bolsa compartida del namespace)
+	QuotaRequestCPU    string
+	QuotaRequestMemory string
+	QuotaLimitCPU      string
+	QuotaLimitMemory   string
+	QuotaMaxPods       string
 }
 
 // Nombres de namespaces reservados por el sistema. Ningún proyecto puede usar estos nombres.
@@ -117,6 +125,57 @@ func Load() *Config {
 		BuildTimeout:      time.Duration(buildTimeoutSec) * time.Second,
 		RolloutTimeout:    time.Duration(rolloutTimeoutSec) * time.Second,
 		AllowedOrigins:    getEnv("ALLOWED_ORIGINS", ""),
+		QuotaRequestCPU:    getEnv("QUOTA_REQUEST_CPU", "500m"),
+		QuotaRequestMemory: getEnv("QUOTA_REQUEST_MEM", "512Mi"),
+		QuotaLimitCPU:      getEnv("QUOTA_LIMIT_CPU", "4000m"),
+		QuotaLimitMemory:   getEnv("QUOTA_LIMIT_MEM", "3Gi"),
+		QuotaMaxPods:       getEnv("QUOTA_MAX_PODS", "10"),
+	}
+}
+
+// RoleResources define las peticiones (reserva/piso) y límites (techo de ráfaga) para un contenedor.
+type RoleResources struct {
+	RequestCPU    string `json:"request_cpu"`
+	RequestMemory string `json:"request_memory"`
+	LimitCPU      string `json:"limit_cpu"`
+	LimitMemory   string `json:"limit_memory"`
+}
+
+// ResourcesForRole retorna la asignación de recursos elásticos según el rol del servicio.
+// - web: frontend estático / SPA (huella mínima en reposo: 16Mi, techo: 128Mi).
+// - api: servidores backend (huella mínima: 32Mi, techo: 512Mi con ráfaga de hasta 1 core).
+// - worker: procesos batch / ML / OCR (huella mínima: 64Mi, techo: 1536Mi y 2 cores para evitar OOM).
+// - default: equivalente a api.
+func (c *Config) ResourcesForRole(role string) RoleResources {
+	switch strings.ToLower(role) {
+	case "web":
+		return RoleResources{
+			RequestCPU:    "10m",
+			RequestMemory: "16Mi",
+			LimitCPU:      "250m",
+			LimitMemory:   "128Mi",
+		}
+	case "api":
+		return RoleResources{
+			RequestCPU:    "20m",
+			RequestMemory: "32Mi",
+			LimitCPU:      "1000m",
+			LimitMemory:   "512Mi",
+		}
+	case "worker":
+		return RoleResources{
+			RequestCPU:    "20m",
+			RequestMemory: "64Mi",
+			LimitCPU:      "2000m",
+			LimitMemory:   "1536Mi",
+		}
+	default:
+		return RoleResources{
+			RequestCPU:    "20m",
+			RequestMemory: "32Mi",
+			LimitCPU:      "1000m",
+			LimitMemory:   "512Mi",
+		}
 	}
 }
 

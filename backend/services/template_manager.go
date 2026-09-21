@@ -17,11 +17,16 @@ type ProjectManifestParams struct {
 	Type             string            `json:"type"` // compose, dockerfile, static
 	Domain           string            `json:"domain"`
 	APIDomain        string            `json:"api_domain,omitempty"`
-	RequiresDatabase bool              `json:"requires_database"`
-	HasCustomEnv     bool              `json:"has_custom_env"`
-	BuildArgs        map[string]string `json:"build_args,omitempty"`
-	Services         []ServiceSpec     `json:"services,omitempty"`
-	Images           map[string]string `json:"images,omitempty"` // servicio → imagen completa
+	RequiresDatabase   bool              `json:"requires_database"`
+	HasCustomEnv       bool              `json:"has_custom_env"`
+	BuildArgs          map[string]string `json:"build_args,omitempty"`
+	Services           []ServiceSpec     `json:"services,omitempty"`
+	Images             map[string]string `json:"images,omitempty"` // servicio → imagen completa
+	QuotaRequestCPU    string            `json:"quota_request_cpu,omitempty"`
+	QuotaRequestMemory string            `json:"quota_request_memory,omitempty"`
+	QuotaLimitCPU      string            `json:"quota_limit_cpu,omitempty"`
+	QuotaLimitMemory   string            `json:"quota_limit_memory,omitempty"`
+	QuotaMaxPods       string            `json:"quota_max_pods,omitempty"`
 }
 
 const baseManifestsTemplate = `apiVersion: v1
@@ -40,11 +45,11 @@ metadata:
   namespace: {{ .Namespace }}
 spec:
   hard:
-    requests.cpu: "500m"
-    requests.memory: "512Mi"
-    limits.cpu: "2000m"
-    limits.memory: "2Gi"
-    pods: "10"
+    requests.cpu: "{{ .QuotaRequestCPU }}"
+    requests.memory: "{{ .QuotaRequestMemory }}"
+    limits.cpu: "{{ .QuotaLimitCPU }}"
+    limits.memory: "{{ .QuotaLimitMemory }}"
+    pods: "{{ .QuotaMaxPods }}"
 ---
 apiVersion: v1
 kind: LimitRange
@@ -54,11 +59,14 @@ metadata:
 spec:
   limits:
     - default:
-        cpu: "500m"
+        cpu: "1000m"
         memory: "512Mi"
       defaultRequest:
-        cpu: "50m"
-        memory: "64Mi"
+        cpu: "20m"
+        memory: "32Mi"
+      max:
+        cpu: "{{ .QuotaLimitCPU }}"
+        memory: "2560Mi"
       type: Container
 ---
 apiVersion: networking.k8s.io/v1
@@ -126,6 +134,7 @@ type serviceDeploymentData struct {
 	IsAPIOrWorker    bool // true si necesita envFrom con secrets
 	DBHost           string
 	BusyboxImage     string
+	Resources        config.RoleResources
 }
 
 // deploymentTemplate genera un Deployment + Service (si tiene puerto) por cada servicio
@@ -202,11 +211,11 @@ spec:
           {{- end }}
           resources:
             requests:
-              cpu: 50m
-              memory: 64Mi
+              cpu: {{ .Resources.RequestCPU }}
+              memory: {{ .Resources.RequestMemory }}
             limits:
-              cpu: 500m
-              memory: 256Mi
+              cpu: {{ .Resources.LimitCPU }}
+              memory: {{ .Resources.LimitMemory }}
 `
 
 const serviceTemplate = `---
@@ -300,6 +309,23 @@ func NewTemplateManager() *TemplateManager {
 }
 
 func (tm *TemplateManager) RenderBaseManifests(params ProjectManifestParams) (string, error) {
+	cfg := config.Load()
+	if params.QuotaRequestCPU == "" {
+		params.QuotaRequestCPU = cfg.QuotaRequestCPU
+	}
+	if params.QuotaRequestMemory == "" {
+		params.QuotaRequestMemory = cfg.QuotaRequestMemory
+	}
+	if params.QuotaLimitCPU == "" {
+		params.QuotaLimitCPU = cfg.QuotaLimitCPU
+	}
+	if params.QuotaLimitMemory == "" {
+		params.QuotaLimitMemory = cfg.QuotaLimitMemory
+	}
+	if params.QuotaMaxPods == "" {
+		params.QuotaMaxPods = cfg.QuotaMaxPods
+	}
+
 	tmpl, err := template.New("base").Parse(baseManifestsTemplate)
 	if err != nil {
 		return "", fmt.Errorf("error al parsear plantilla base: %w", err)
@@ -365,6 +391,7 @@ func (tm *TemplateManager) RenderServiceManifests(params ProjectManifestParams) 
 			IsAPIOrWorker:    isAPIOrWorker,
 			DBHost:           cfg.DBAppHost,
 			BusyboxImage:     cfg.BusyboxImage,
+			Resources:        cfg.ResourcesForRole(string(svc.Role)),
 		}
 
 		// Renderizar Deployment

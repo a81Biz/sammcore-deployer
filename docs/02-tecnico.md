@@ -205,6 +205,25 @@ Toda la configuración del deployer se centraliza en `backend/config/config.go`:
 | `KANIKO_IMAGE` | `gcr.io/kaniko-project/executor:v1.23.2` | Imagen Kaniko (versión fija) |
 | `BUILD_TIMEOUT_SEC` | `900` | Timeout build en segundos |
 | `ROLLOUT_TIMEOUT_SEC` | `300` | Timeout rollout en segundos |
+| `QUOTA_REQUEST_CPU` | `500m` | Piso de CPU garantizado para el namespace del proyecto |
+| `QUOTA_REQUEST_MEM` | `512Mi` | Piso de RAM garantizado para el namespace del proyecto |
+| `QUOTA_LIMIT_CPU` | `4000m` | Techo de ráfaga de CPU por namespace (hasta 4 cores) |
+| `QUOTA_LIMIT_MEM` | `3Gi` | Techo de ráfaga de RAM por namespace (bolsa compartida) |
+| `QUOTA_MAX_PODS` | `10` | Máximo de pods por namespace |
+
+### Dimensionamiento Dinámico y Elasticidad por Rol
+
+Para evitar el bloqueo de capacidad por sobre-aprovisionamiento estático y al mismo tiempo impedir caídas por `OOMKilled` en cargas pesadas (ej. workers con PyTorch, Ultralytics u OpenCV), el deployer opera bajo el modelo **QoS Burstable**:
+
+* **Piso mínimo de reserva (`requests`)**:
+  * Cada pod solicita un piso casi testimonial en reposo (10m-20m CPU, 16Mi-64Mi RAM).
+  * Un proyecto estándar de 3 pods (Web + API + Worker) solo aparta **112 MiB de RAM** y **50m CPU** del clúster en reposo. Esto permite desplegar decenas de sitios o proyectos piloto simultáneos en el servidor sin agotar la capacidad ante el scheduler.
+* **Techo de ráfaga elástica (`limits` por rol)**:
+  * **`web`**: req `10m`/`16Mi`, limit `250m`/`128Mi`.
+  * **`api`**: req `20m`/`32Mi`, limit `1000m`/`512Mi` (aceleración instantánea ante picos de tráfico).
+  * **`worker`**: req `20m`/`64Mi`, limit `2000m`/`1536Mi` (2 cores y 1.5 GiB de techo para OCR/visión artificial).
+* **Bolsa Compartida por Namespace (`ResourceQuota`)**:
+  * El namespace tiene un techo global (3 GiB RAM / 4 cores) que se comparte dinámicamente entre todos los pods del proyecto. Si los pods Web y API están en reposo (ej. 8 MiB juntos), el Worker dispone de prácticamente todo el presupuesto del proyecto sin provocar contención. Al terminar la tarea pesada, el servidor físico recupera la memoria libre para otros desarrollos.
 
 ### Token de GitHub — env var, no URL
 
