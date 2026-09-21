@@ -100,3 +100,48 @@ func TestStore_CorruptBackup(t *testing.T) {
 		t.Errorf("expected AddOrUpdateProject to fail instead of overwriting corrupt data, got nil")
 	}
 }
+
+func TestStore_NamespaceConflict(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "test-conflict-store-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	os.Setenv("DATA_DIR", tmpDir)
+	defer os.Unsetenv("DATA_DIR")
+
+	p1 := Project{
+		ID:        "proj-1",
+		Name:      "my-site",
+		Namespace: "my-site",
+		Repo:      "https://github.com/org1/repo1",
+	}
+	if err := AddOrUpdateProject(p1); err != nil {
+		t.Fatalf("AddOrUpdateProject p1 failed: %v", err)
+	}
+
+	// Mismo repositorio: debe permitir actualización
+	p1Updated := Project{
+		ID:        "proj-1",
+		Name:      "my-site",
+		Namespace: "my-site",
+		Repo:      "https://github.com/org1/repo1",
+		Branch:    "develop",
+	}
+	if err := AddOrUpdateProject(p1Updated); err != nil {
+		t.Fatalf("AddOrUpdateProject update should succeed: %v", err)
+	}
+
+	// Repositorio distinto con mismo namespace: DEBE rechazar con ErrNamespaceConflict
+	p2 := Project{
+		ID:        "proj-2",
+		Name:      "my-site",
+		Namespace: "my-site",
+		Repo:      "https://github.com/org2/other-repo",
+	}
+	err = AddOrUpdateProject(p2)
+	if err == nil {
+		t.Fatalf("expected ErrNamespaceConflict when namespace is already taken by another repo, got nil")
+	}
+}

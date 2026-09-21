@@ -6,7 +6,10 @@ import (
 	"testing"
 	"time"
 
+	appsv1 "k8s.io/api/apps/v1"
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
 
@@ -236,5 +239,156 @@ func TestValidateProjectName(t *testing.T) {
 		if (err != nil) != tt.wantErr {
 			t.Errorf("ValidateProjectName(%q) error = %v, wantErr %v", tt.name, err, tt.wantErr)
 		}
+	}
+}
+
+func TestDeployManager_Rollback_FirstDeploy(t *testing.T) {
+	client := fake.NewSimpleClientset()
+	dm := NewDeployManager(client)
+	ctx := context.Background()
+
+	p := storage.Project{
+		Name:      "test-app",
+		Namespace: "test-app",
+	}
+
+	// Simular recursos creados durante un primer deploy que falló
+	dep := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-app-web", Namespace: "test-app"},
+	}
+	svc := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-app-web", Namespace: "test-app"},
+	}
+	_, _ = client.AppsV1().Deployments("test-app").Create(ctx, dep, metav1.CreateOptions{})
+	_, _ = client.CoreV1().Services("test-app").Create(ctx, svc, metav1.CreateOptions{})
+
+	// Ejecutar rollback para primer deploy (isUpdate = false)
+	dm.RollbackDeployment(ctx, p, "build failed", false, false, nil)
+
+	// Verificar que los recursos fueron limpiados
+	_, err := client.AppsV1().Deployments("test-app").Get(ctx, "test-app-web", metav1.GetOptions{})
+	if err == nil {
+		t.Errorf("expected deployment test-app-web to be deleted on first deploy rollback")
+	}
+	_, err = client.CoreV1().Services("test-app").Get(ctx, "test-app-web", metav1.GetOptions{})
+	if err == nil {
+		t.Errorf("expected service test-app-web to be deleted on first deploy rollback")
+	}
+}
+
+func TestDeployManager_Rollback_UpdatePreApply(t *testing.T) {
+	client := fake.NewSimpleClientset()
+	dm := NewDeployManager(client)
+	ctx := context.Background()
+
+	p := storage.Project{
+		Name:      "test-app",
+		Namespace: "test-app",
+	}
+
+	// Simular app en ejecución sana
+	dep := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-app-web", Namespace: "test-app"},
+		Spec: appsv1.DeploymentSpec{
+			Template: corev1.PodTemplateSpec{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "web", Image: "localhost:30500/test-app/web:v1"}},
+				},
+			},
+		},
+	}
+	_, _ = client.AppsV1().Deployments("test-app").Create(ctx, dep, metav1.CreateOptions{})
+
+	previousImages := map[string]map[string]string{
+		"test-app-web": {"web": "localhost:30500/test-app/web:v1"},
+	}
+
+	// Fallo antes de aplicar manifiestos en un redeploy (ej. build falló)
+	dm.RollbackDeployment(ctx, p, "kaniko build failed", true, false, previousImages)
+
+	// Los recursos DEBEN seguir existiendo intactos
+	gotDep, err := client.AppsV1().Deployments("test-app").Get(ctx, "test-app-web", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("expected deployment test-app-web to remain untouched on pre-apply failure: %v", err)
+	}
+	if gotDep.Spec.Template.Spec.Containers[0].Image != "localhost:30500/test-app/web:v1" {
+		t.Errorf("expected original image preserved, got %s", gotDep.Spec.Template.Spec.Containers[0].Image)
+	}
+}
+
+func TestDeployManager_Rollback_UpdatePostApply(t *testing.T) {
+	client := fake.NewSimpleClientset()
+	dm := NewDeployManager(client)
+	ctx := context.Background()
+
+	p := storage.Project{
+		Name:      "test-app",
+		Namespace: "test-app",
+	}
+
+	// Simular deployment que fue actualizado a v2 (pero falló en rollout)
+	dep := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-app-web", Namespace: "test-app"},
+		Spec: appsv1.DeploymentSpec{
+			Template: corev1.PodTemplateSpec{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "web", Image: "localhost:30500/test-app/web:v2"}},
+				},
+			},
+		},
+	}
+	_, _ = client.AppsV1().Deployments("test-app").Create(ctx, dep, metav1.CreateOptions{})
+
+	previousImages := map[string]map[string]string{
+		"test-app-web": {"web": "localhost:30500/test-app/web:v1"},
+	}
+
+	// Rollback post-apply debe revertir la imagen a v1 en lugar de borrar el deployment
+	dm.RollbackDeployment(ctx, p, "rollout timeout", true, true, previousImages)
+
+	gotDep, err := client.AppsV1().Deployments("test-app").Get(ctx, "test-app-web", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("expected deployment test-app-web to still exist after rollback: %v", err)
+	}
+	if gotDep.Spec.Template.Spec.Containers[0].Image != "localhost:30500/test-app/web:v1" {
+		t.Errorf("expected image reverted to v1, got %s", gotDep.Spec.Template.Spec.Containers[0].Image)
+	}
+}
+
+func TestDeployManager_PruneObsoleteResources(t *testing.T) {
+	client := fake.NewSimpleClientset()
+	dm := NewDeployManager(client)
+	ctx := context.Background()
+
+	labels := map[string]string{
+		"app.kubernetes.io/managed-by": "sammcore-deployer",
+		"project":                      "my-proj",
+	}
+
+	// Crear 2 deployments: uno activo y otro obsoleto (worker eliminado)
+	depActive := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "my-proj-web", Namespace: "my-proj", Labels: labels},
+	}
+	depObsolete := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "my-proj-worker", Namespace: "my-proj", Labels: labels},
+	}
+	_, _ = client.AppsV1().Deployments("my-proj").Create(ctx, depActive, metav1.CreateOptions{})
+	_, _ = client.AppsV1().Deployments("my-proj").Create(ctx, depObsolete, metav1.CreateOptions{})
+
+	desiredDeployments := map[string]bool{"my-proj-web": true}
+	desiredServices := map[string]bool{"my-proj-web": true}
+
+	dm.pruneObsoleteResources(ctx, "my-proj", "my-proj", desiredDeployments, desiredServices)
+
+	// El activo debe persistir
+	_, err := client.AppsV1().Deployments("my-proj").Get(ctx, "my-proj-web", metav1.GetOptions{})
+	if err != nil {
+		t.Errorf("expected active deployment to remain: %v", err)
+	}
+
+	// El obsoleto debe ser eliminado
+	_, err = client.AppsV1().Deployments("my-proj").Get(ctx, "my-proj-worker", metav1.GetOptions{})
+	if err == nil {
+		t.Errorf("expected obsolete deployment my-proj-worker to be pruned")
 	}
 }
