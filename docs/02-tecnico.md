@@ -188,6 +188,7 @@ Para garantizar la autonomía total del clúster sin depender de servicios exter
   - **Proyectos con `package.json` (Vite, React, Vue, Next export):** Multi-stage build con `node:20-alpine` (`npm install && npm run build`) y servidor `nginx:alpine` sirviendo `/dist` con soporte completo de enrutamiento SPA (`try_files $uri $uri/ /index.html`).
   - **Sitios HTML estáticos puros:** Servidor `nginx:alpine` copiando directamente los assets al webroot.
 * **Logs Sanitizados en Vivo:** Durante el estado `building_image`, el endpoint `/api/projects/:id/logs` remueve códigos ANSI (`\x1b[...]`) y filtra trazas irrelevantes de paquetes, permitiendo supervisar el build en tiempo real.
+* **Resolución DNS Sin Bloqueo por Tasa:** El servidor DNS local (AdGuard Home en el nodo) opera con `ratelimit: 0` para evitar bloqueos por ráfagas de consultas durante descargas paralelas de imágenes base y dependencias de npm.
 
 ---
 

@@ -122,6 +122,16 @@ Este documento define la trayectoria técnica del proyecto, contrastando el esta
   3. [x] Worker de fondo en Python 3.9 + PyTorch OCR (1/1 Running sin reinicios).
   4. [x] Base de datos `backroom_db` conectada y funcional en PostgreSQL central de Supabase (Modelo A con migraciones completas bajo `backroom_user`).
 
+### 🔹 Hito 4.6: Despliegue Piloto techic-agency — Frontend SPA Estático (✅ 100% Operativo)
+* **Objetivo:** Desplegar exitosamente una aplicación frontend SPA en React/Vite (`https://github.com/a81Biz/techic.agency.git`, commit `b197dd2`) sin Dockerfile manual, validando la auto-generación multi-stage, la compilación de npm y la convivencia multi-proyecto.
+* **Criterios de Aceptación Cumplidos:**
+  1. [x] Detección automática como proyecto `static` (`ProjectStatic`) con `build_context: "."` y asignación de `Dockerfile.sammcore`.
+  2. [x] Auto-generación en tiempo de build de Dockerfile multi-stage (`node:20-alpine` build + `nginx:alpine` SPA).
+  3. [x] Resolución DNS in-cluster robusta: eliminación de cuellos de botella por limitación de tasa en DNS upstream (`ratelimit: 0` en AdGuard Home).
+  4. [x] Compilación Kaniko, generación y push de imagen a `registry.sammcore-registry.svc.cluster.local:5000/techic-agency/static:b197dd26d26b`.
+  5. [x] Despliegue en K3s con cuota elástica reducida en reposo (`16Mi` RAM / `10m` CPU request), Ingress NGINX y acceso funcional en `https://techic-agency.sammcore.local` (HTTP 200 OK con carga completa de assets JS/CSS).
+  6. [x] Coexistencia simultánea con `backroom` sin competencia de recursos.
+
 ---
 
 ## 🟢 Fase 5: CI/CD y Auto-Despliegue del Deployer (✅ Completada)
